@@ -1,0 +1,130 @@
+{
+  "summary": {
+    "total_tests": 20,
+    "passed_tests": 20,
+    "success_rate": 100.0,
+    "timestamp": "2025-12-14T04:06:07.221417"
+  },
+  "detailed_results": [
+    {
+      "test": "Login with admin credentials",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:06.550819"
+    },
+    {
+      "test": "Token extraction",
+      "success": true,
+      "details": "User: Super Admin",
+      "timestamp": "2025-12-14T04:06:06.551448"
+    },
+    {
+      "test": "GET /api/dashboard/stats",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:06.631061"
+    },
+    {
+      "test": "Dashboard data structure",
+      "success": true,
+      "details": "Merchants: 0, Terminals: 0, Transactions: 0",
+      "timestamp": "2025-12-14T04:06:06.631703"
+    },
+    {
+      "test": "GET /api/merchants",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:06.671001"
+    },
+    {
+      "test": "POST /api/merchants (create merchant)",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:06.710776"
+    },
+    {
+      "test": "Merchant creation",
+      "success": true,
+      "details": "Created merchant ID: a0165218-b052-490d-bf77-71a3aa6eec5d",
+      "timestamp": "2025-12-14T04:06:06.711247"
+    },
+    {
+      "test": "GET /api/merchants/a0165218-b052-490d-bf77-71a3aa6eec5d",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:06.751709"
+    },
+    {
+      "test": "PUT /api/merchants/a0165218-b052-490d-bf77-71a3aa6eec5d",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:06.790727"
+    },
+    {
+      "test": "GET merchants for terminal test",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:06.826833"
+    },
+    {
+      "test": "GET /api/admin/terminals",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:06.861812"
+    },
+    {
+      "test": "POST /api/admin/terminals (create terminal)",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:06.898368"
+    },
+    {
+      "test": "Terminal creation",
+      "success": true,
+      "details": "Created terminal ID: e1234754-4823-475f-94ee-4f69768d117d",
+      "timestamp": "2025-12-14T04:06:06.899119"
+    },
+    {
+      "test": "GET merchants for Block29 test",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:06.937410"
+    },
+    {
+      "test": "POST /api/block29/provision-terminal",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:06.990913"
+    },
+    {
+      "test": "Block29 provisioning",
+      "success": true,
+      "details": "Provision ID: 91e5273c-49ef-4a14-9bbb-d8f49239f736",
+      "timestamp": "2025-12-14T04:06:06.991668"
+    },
+    {
+      "test": "GET /api/admin/varsheets",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:07.033462"
+    },
+    {
+      "test": "GET /api/users",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:07.110702"
+    },
+    {
+      "test": "GET /api/transactions",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:07.145413"
+    },
+    {
+      "test": "GET /api/agents",
+      "success": true,
+      "details": "Status: 200",
+      "timestamp": "2025-12-14T04:06:07.220494"
+    }
+  ]
+}
