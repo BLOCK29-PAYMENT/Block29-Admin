@@ -188,9 +188,15 @@ export default function TerminalsPage() {
                     <SelectValue placeholder="Select merchant" />
                   </SelectTrigger>
                   <SelectContent>
-                    {merchants.map((m) => (
-                      <SelectItem key={m.id} value={m.id}>{m.business_name}</SelectItem>
-                    ))}
+                    {merchants.length === 0 ? (
+                      <div className="p-2 text-sm text-slate-500 text-center">No merchants available. Create one first.</div>
+                    ) : (
+                      merchants.map((m) => (
+                        <SelectItem key={m.id} value={m.id} data-testid={`merchant-option-${m.id}`}>
+                          {m.business_name}
+                        </SelectItem>
+                      ))
+                    )}
                   </SelectContent>
                 </Select>
               </div>
