@@ -13,8 +13,9 @@ import {
   SelectValue,
 } from '../components/ui/select';
 import { Textarea } from '../components/ui/textarea';
+import { Separator } from '../components/ui/separator';
 import { toast } from 'sonner';
-import { Upload, FileText, CheckCircle, AlertCircle, RefreshCw, Save, Zap, Play } from 'lucide-react';
+import { Upload, FileText, CheckCircle, AlertCircle, RefreshCw, Save, Zap, Play, MapPin, CreditCard, Network, Building, Phone, Globe } from 'lucide-react';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -108,7 +109,7 @@ export default function VarSheetPage() {
       const response = await axios.post(`${API}/admin/varsheet/${selectedVarsheet.id}/parse`);
       setParsedData(response.data.parsed_json);
       setSelectedVarsheet({ ...selectedVarsheet, ...response.data });
-      toast.success('VAR Sheet parsed successfully');
+      toast.success(`VAR Sheet parsed - ${response.data.parsed_json?.confidence_score || 0}% confidence`);
       fetchVarsheets();
     } catch (error) {
       toast.error('Parsing failed');
@@ -135,16 +136,20 @@ export default function VarSheetPage() {
     try {
       const terminalData = {
         merchant_id: selectedVarsheet.merchant_id,
-        provider: 'luqra',
-        v_number: parsedData.v_number,
+        provider: 'tsys',
+        v_number: parsedData.v_number_primary,
         merchant_number: parsedData.merchant_number,
         terminal_number: parsedData.terminal_number,
         bin: parsedData.bin,
         chain: parsedData.chain,
         store_number: parsedData.store_number,
+        agent_code: parsedData.agent,
+        edc_primary: parsedData.edc_primary,
+        edc_secondary: parsedData.edc_secondary,
         amex_se: parsedData.amex_se,
         disc_se: parsedData.disc_se,
         aba: parsedData.aba,
+        reimbursement_att: parsedData.reimbursement_att,
         card_types: parsedData.card_types,
         networks: parsedData.networks,
         raw_comments: parsedData.raw_comments,
@@ -177,11 +182,15 @@ export default function VarSheetPage() {
     return <span className={`badge ${styles[status] || 'badge-pending'}`}>{status}</span>;
   };
 
+  const updateField = (field, value) => {
+    setParsedData({ ...parsedData, [field]: value });
+  };
+
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-bold text-slate-900">VAR Sheet Setup (Luqra)</h1>
-        <p className="text-slate-500 mt-1">Upload and parse VAR sheets for terminal provisioning</p>
+        <h1 className="text-2xl font-bold text-slate-900">VAR Sheet Setup (TSYS)</h1>
+        <p className="text-slate-500 mt-1">Upload and parse TSYS VAR Form / Express Keysheets for terminal provisioning</p>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -229,8 +238,8 @@ export default function VarSheetPage() {
                 <p className="text-sm text-slate-600">Uploading...</p>
               ) : (
                 <>
-                  <p className="text-sm text-slate-600">Drop PDF here or click to browse</p>
-                  <p className="text-xs text-slate-400 mt-1">Provider: Luqra (fixed)</p>
+                  <p className="text-sm text-slate-600">Drop TSYS VAR Sheet PDF here</p>
+                  <p className="text-xs text-slate-400 mt-1">or click to browse</p>
                 </>
               )}
             </div>
@@ -277,6 +286,11 @@ export default function VarSheetPage() {
                   {selectedVarsheet 
                     ? `Editing: ${selectedVarsheet.filename}` 
                     : 'Select a VAR sheet to view/edit'}
+                  {parsedData?.confidence_score && (
+                    <span className="ml-2 text-emerald-600 font-medium">
+                      ({parsedData.confidence_score}% confidence)
+                    </span>
+                  )}
                 </CardDescription>
               </div>
               {selectedVarsheet && (
@@ -288,7 +302,7 @@ export default function VarSheetPage() {
                     data-testid="parse-varsheet-btn"
                   >
                     {parsing ? <RefreshCw className="animate-spin mr-2" size={16} /> : <Play size={16} className="mr-2" />}
-                    Parse
+                    Parse PDF
                   </Button>
                 </div>
               )}
@@ -297,59 +311,104 @@ export default function VarSheetPage() {
           <CardContent>
             {selectedVarsheet && parsedData ? (
               <Tabs defaultValue="merchant" className="w-full">
-                <TabsList className="mb-4">
+                <TabsList className="mb-4 flex-wrap">
                   <TabsTrigger value="merchant">Merchant Info</TabsTrigger>
                   <TabsTrigger value="terminal">Terminal IDs</TabsTrigger>
+                  <TabsTrigger value="location">Location</TabsTrigger>
                   <TabsTrigger value="cards">Card Types</TabsTrigger>
-                  <TabsTrigger value="debit">Debit/Comments</TabsTrigger>
+                  <TabsTrigger value="networks">Networks</TabsTrigger>
+                  <TabsTrigger value="comments">Comments/SE</TabsTrigger>
                 </TabsList>
 
+                {/* MERCHANT INFO TAB */}
                 <TabsContent value="merchant" className="space-y-4">
+                  <div className="flex items-center gap-2 mb-4 text-slate-600">
+                    <Building size={18} />
+                    <span className="font-medium">Merchant Information</span>
+                  </div>
                   <div className="grid grid-cols-2 gap-4">
-                    <div>
+                    <div className="col-span-2">
                       <Label>Merchant Name</Label>
                       <Input
                         value={parsedData.merchant_name || ''}
-                        onChange={(e) => setParsedData({...parsedData, merchant_name: e.target.value})}
+                        onChange={(e) => updateField('merchant_name', e.target.value)}
                         data-testid="parsed-merchant-name"
-                      />
-                    </div>
-                    <div>
-                      <Label>V Number</Label>
-                      <Input
-                        value={parsedData.v_number || ''}
-                        onChange={(e) => setParsedData({...parsedData, v_number: e.target.value})}
-                        className="font-mono"
-                        data-testid="parsed-v-number"
                       />
                     </div>
                     <div>
                       <Label>Merchant Number</Label>
                       <Input
                         value={parsedData.merchant_number || ''}
-                        onChange={(e) => setParsedData({...parsedData, merchant_number: e.target.value})}
+                        onChange={(e) => updateField('merchant_number', e.target.value)}
                         className="font-mono"
                         data-testid="parsed-merchant-number"
                       />
                     </div>
                     <div>
-                      <Label>Store Number</Label>
+                      <Label>Terminal Status</Label>
                       <Input
-                        value={parsedData.store_number || ''}
-                        onChange={(e) => setParsedData({...parsedData, store_number: e.target.value})}
+                        value={parsedData.terminal_status || ''}
+                        onChange={(e) => updateField('terminal_status', e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <Label>V Number (Primary)</Label>
+                      <Input
+                        value={parsedData.v_number_primary || ''}
+                        onChange={(e) => updateField('v_number_primary', e.target.value)}
+                        className="font-mono"
+                        data-testid="parsed-v-number"
+                      />
+                    </div>
+                    <div>
+                      <Label>V Number (Secondary)</Label>
+                      <Input
+                        value={parsedData.v_number_secondary || ''}
+                        onChange={(e) => updateField('v_number_secondary', e.target.value)}
+                        className="font-mono"
+                      />
+                    </div>
+                    <div>
+                      <Label>Industry Type</Label>
+                      <Select 
+                        value={parsedData.industry_type || ''} 
+                        onValueChange={(v) => updateField('industry_type', v)}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder="Select..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="Retail">Retail</SelectItem>
+                          <SelectItem value="Restaurant">Restaurant</SelectItem>
+                          <SelectItem value="QSR">QSR</SelectItem>
+                          <SelectItem value="Lodging">Lodging</SelectItem>
+                          <SelectItem value="Direct Marketing">Direct Marketing</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div>
+                      <Label>VISA MCC</Label>
+                      <Input
+                        value={parsedData.visa_mcc || ''}
+                        onChange={(e) => updateField('visa_mcc', e.target.value)}
                         className="font-mono"
                       />
                     </div>
                   </div>
                 </TabsContent>
 
+                {/* TERMINAL IDS TAB */}
                 <TabsContent value="terminal" className="space-y-4">
+                  <div className="flex items-center gap-2 mb-4 text-slate-600">
+                    <CreditCard size={18} />
+                    <span className="font-medium">Terminal & Processing IDs</span>
+                  </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <Label>Terminal Number</Label>
+                      <Label>Terminal #</Label>
                       <Input
                         value={parsedData.terminal_number || ''}
-                        onChange={(e) => setParsedData({...parsedData, terminal_number: e.target.value})}
+                        onChange={(e) => updateField('terminal_number', e.target.value)}
                         className="font-mono"
                         data-testid="parsed-terminal-number"
                       />
@@ -358,7 +417,15 @@ export default function VarSheetPage() {
                       <Label>BIN</Label>
                       <Input
                         value={parsedData.bin || ''}
-                        onChange={(e) => setParsedData({...parsedData, bin: e.target.value})}
+                        onChange={(e) => updateField('bin', e.target.value)}
+                        className="font-mono"
+                      />
+                    </div>
+                    <div>
+                      <Label>Agent</Label>
+                      <Input
+                        value={parsedData.agent || ''}
+                        onChange={(e) => updateField('agent', e.target.value)}
                         className="font-mono"
                       />
                     </div>
@@ -366,76 +433,254 @@ export default function VarSheetPage() {
                       <Label>Chain</Label>
                       <Input
                         value={parsedData.chain || ''}
-                        onChange={(e) => setParsedData({...parsedData, chain: e.target.value})}
+                        onChange={(e) => updateField('chain', e.target.value)}
                         className="font-mono"
                       />
                     </div>
                     <div>
-                      <Label>ABA</Label>
+                      <Label>Store Number</Label>
                       <Input
-                        value={parsedData.aba || ''}
-                        onChange={(e) => setParsedData({...parsedData, aba: e.target.value})}
+                        value={parsedData.store_number || ''}
+                        onChange={(e) => updateField('store_number', e.target.value)}
+                        className="font-mono"
+                      />
+                    </div>
+                    <div>
+                      <Label>Location Number</Label>
+                      <Input
+                        value={parsedData.location_number || ''}
+                        onChange={(e) => updateField('location_number', e.target.value)}
+                        className="font-mono"
+                      />
+                    </div>
+                    <div>
+                      <Label>EDC Primary</Label>
+                      <Input
+                        value={parsedData.edc_primary || ''}
+                        onChange={(e) => updateField('edc_primary', e.target.value)}
+                        className="font-mono"
+                      />
+                    </div>
+                    <div>
+                      <Label>EDC Secondary</Label>
+                      <Input
+                        value={parsedData.edc_secondary || ''}
+                        onChange={(e) => updateField('edc_secondary', e.target.value)}
                         className="font-mono"
                       />
                     </div>
                   </div>
                 </TabsContent>
 
-                <TabsContent value="cards" className="space-y-4">
+                {/* LOCATION TAB */}
+                <TabsContent value="location" className="space-y-4">
+                  <div className="flex items-center gap-2 mb-4 text-slate-600">
+                    <MapPin size={18} />
+                    <span className="font-medium">Location Information</span>
+                  </div>
                   <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <Label>Card Types (comma separated)</Label>
+                    <div className="col-span-2">
+                      <Label>Street Address</Label>
                       <Input
-                        value={parsedData.card_types?.join(', ') || ''}
-                        onChange={(e) => setParsedData({
-                          ...parsedData, 
-                          card_types: e.target.value.split(',').map(s => s.trim()).filter(Boolean)
-                        })}
-                        placeholder="VISA, MasterCard, AMEX"
-                        data-testid="parsed-card-types"
+                        value={parsedData.street_address || ''}
+                        onChange={(e) => updateField('street_address', e.target.value)}
                       />
                     </div>
                     <div>
-                      <Label>Networks (comma separated)</Label>
+                      <Label>City</Label>
                       <Input
-                        value={parsedData.networks?.join(', ') || ''}
-                        onChange={(e) => setParsedData({
-                          ...parsedData, 
-                          networks: e.target.value.split(',').map(s => s.trim()).filter(Boolean)
-                        })}
-                        placeholder="STAR, PLUS, NYCE"
+                        value={parsedData.city || ''}
+                        onChange={(e) => updateField('city', e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <Label>State</Label>
+                      <Input
+                        value={parsedData.state || ''}
+                        onChange={(e) => updateField('state', e.target.value)}
+                        maxLength={2}
+                        className="uppercase"
+                      />
+                    </div>
+                    <div>
+                      <Label>Postal Code</Label>
+                      <Input
+                        value={parsedData.postal_code || ''}
+                        onChange={(e) => updateField('postal_code', e.target.value)}
+                        className="font-mono"
+                      />
+                    </div>
+                    <div>
+                      <Label>Phone</Label>
+                      <Input
+                        value={parsedData.phone || ''}
+                        onChange={(e) => updateField('phone', e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <Label>Country</Label>
+                      <Input
+                        value={parsedData.country || ''}
+                        onChange={(e) => updateField('country', e.target.value)}
+                        maxLength={2}
+                      />
+                    </div>
+                    <div>
+                      <Label>Currency Code</Label>
+                      <Input
+                        value={parsedData.currency_code || ''}
+                        onChange={(e) => updateField('currency_code', e.target.value)}
+                        className="font-mono"
+                      />
+                    </div>
+                    <div>
+                      <Label>Time Zone</Label>
+                      <Input
+                        value={parsedData.time_zone || ''}
+                        onChange={(e) => updateField('time_zone', e.target.value)}
+                      />
+                    </div>
+                    <div>
+                      <Label>Time Zone Differential</Label>
+                      <Input
+                        value={parsedData.time_zone_differential || ''}
+                        onChange={(e) => updateField('time_zone_differential', e.target.value)}
+                        className="font-mono"
                       />
                     </div>
                   </div>
                 </TabsContent>
 
-                <TabsContent value="debit" className="space-y-4">
+                {/* CARD TYPES TAB */}
+                <TabsContent value="cards" className="space-y-4">
+                  <div className="flex items-center gap-2 mb-4 text-slate-600">
+                    <CreditCard size={18} />
+                    <span className="font-medium">Accepted Card Types</span>
+                  </div>
+                  <div>
+                    <Label>Card Types (comma separated)</Label>
+                    <Input
+                      value={parsedData.card_types?.join(', ') || ''}
+                      onChange={(e) => updateField('card_types', e.target.value.split(',').map(s => s.trim()).filter(Boolean))}
+                      placeholder="VISA, MasterCard, American Express, JCB, Discover, ATM/Debit"
+                      data-testid="parsed-card-types"
+                    />
+                    <p className="text-xs text-slate-500 mt-1">
+                      Common: VISA, MasterCard, American Express, JCB, Discover, ATM/Debit
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2 mt-4">
+                    {parsedData.card_types?.map((card, idx) => (
+                      <span key={idx} className="badge badge-info">{card}</span>
+                    ))}
+                  </div>
+                </TabsContent>
+
+                {/* NETWORKS TAB */}
+                <TabsContent value="networks" className="space-y-4">
+                  <div className="flex items-center gap-2 mb-4 text-slate-600">
+                    <Network size={18} />
+                    <span className="font-medium">Networks & Sharing Groups</span>
+                  </div>
+                  <div>
+                    <Label>Networks (comma separated)</Label>
+                    <Input
+                      value={parsedData.networks?.join(', ') || ''}
+                      onChange={(e) => updateField('networks', e.target.value.split(',').map(s => s.trim()).filter(Boolean))}
+                      placeholder="Pulse, Interlink, STAR, Maestro, NYCE, ACCEL, EBT POS, Visa PAVD"
+                    />
+                    <p className="text-xs text-slate-500 mt-1">
+                      Common TSYS Networks: Pulse, Interlink, STAR, Maestro, NYCE, ACCEL, EBT POS, Visa PAVD
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2 mt-4">
+                    {parsedData.networks?.map((network, idx) => (
+                      <span key={idx} className="badge badge-success">{network}</span>
+                    ))}
+                  </div>
+                  <Separator className="my-4" />
+                  <div>
+                    <Label>Host Capture Participant</Label>
+                    <Select 
+                      value={parsedData.host_capture_participant || ''} 
+                      onValueChange={(v) => updateField('host_capture_participant', v)}
+                    >
+                      <SelectTrigger className="w-[180px]">
+                        <SelectValue placeholder="Select..." />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="Y">Yes (Y)</SelectItem>
+                        <SelectItem value="N">No (N)</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </TabsContent>
+
+                {/* COMMENTS/SE TAB */}
+                <TabsContent value="comments" className="space-y-4">
+                  <div className="flex items-center gap-2 mb-4 text-slate-600">
+                    <Globe size={18} />
+                    <span className="font-medium">Financial Identifiers (from Comments)</span>
+                  </div>
                   <div className="grid grid-cols-2 gap-4">
                     <div>
                       <Label>AMEX SE</Label>
                       <Input
                         value={parsedData.amex_se || ''}
-                        onChange={(e) => setParsedData({...parsedData, amex_se: e.target.value})}
+                        onChange={(e) => updateField('amex_se', e.target.value)}
                         className="font-mono"
+                        placeholder="10-digit"
                       />
                     </div>
                     <div>
                       <Label>Discover SE</Label>
                       <Input
                         value={parsedData.disc_se || ''}
-                        onChange={(e) => setParsedData({...parsedData, disc_se: e.target.value})}
+                        onChange={(e) => updateField('disc_se', e.target.value)}
                         className="font-mono"
+                        placeholder="15-digit"
+                      />
+                    </div>
+                    <div>
+                      <Label>ABA / Routing Number</Label>
+                      <Input
+                        value={parsedData.aba || ''}
+                        onChange={(e) => updateField('aba', e.target.value)}
+                        className="font-mono"
+                        placeholder="9-digit"
+                      />
+                    </div>
+                    <div>
+                      <Label>Reimbursement ATT</Label>
+                      <Input
+                        value={parsedData.reimbursement_att || ''}
+                        onChange={(e) => updateField('reimbursement_att', e.target.value)}
+                        className="font-mono uppercase"
+                        maxLength={1}
                       />
                     </div>
                     <div className="col-span-2">
-                      <Label>Comments</Label>
+                      <Label>Raw Comments</Label>
                       <Textarea
                         value={parsedData.raw_comments || ''}
-                        onChange={(e) => setParsedData({...parsedData, raw_comments: e.target.value})}
+                        onChange={(e) => updateField('raw_comments', e.target.value)}
                         rows={4}
+                        placeholder="Full comments section from VAR sheet..."
                       />
                     </div>
                   </div>
+                  
+                  {/* Extraction Notes */}
+                  {parsedData.extraction_notes?.length > 0 && (
+                    <div className="mt-4 p-4 bg-slate-50 rounded-lg">
+                      <Label className="mb-2 block">Extraction Notes</Label>
+                      <ul className="text-xs text-slate-600 space-y-1">
+                        {parsedData.extraction_notes.map((note, idx) => (
+                          <li key={idx}>• {note}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
                 </TabsContent>
 
                 {/* Actions */}
