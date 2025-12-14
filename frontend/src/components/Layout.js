@@ -15,7 +15,10 @@ import {
   Bell,
   ChevronDown,
   Menu,
-  X
+  X,
+  CreditCard,
+  BarChart3,
+  ScrollText
 } from 'lucide-react';
 import {
   DropdownMenu,
