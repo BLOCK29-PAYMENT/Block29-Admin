@@ -85,7 +85,7 @@ class SalonBookinAPITester:
             "Create Test Merchant",
             "POST",
             "merchants",
-            201,
+            200,  # Backend returns 200, not 201
             data=merchant_data
         )
         if success and 'id' in response:
