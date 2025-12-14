@@ -205,6 +205,48 @@ input:focus, select:focus, textarea:focus {
     @apply uppercase text-xs tracking-wider font-semibold text-slate-500;
 }
 
+/* Floating animations */
+@keyframes float {
+    0%, 100% {
+        transform: translateY(0px);
+    }
+    50% {
+        transform: translateY(-15px);
+    }
+}
+
+@keyframes float-delayed {
+    0%, 100% {
+        transform: translateY(0px);
+    }
+    50% {
+        transform: translateY(-12px);
+    }
+}
+
+@keyframes float-slow {
+    0%, 100% {
+        transform: translateY(0px);
+    }
+    50% {
+        transform: translateY(-10px);
+    }
+}
+
+.animate-float {
+    animation: float 4s ease-in-out infinite;
+}
+
+.animate-float-delayed {
+    animation: float-delayed 5s ease-in-out infinite;
+    animation-delay: 1s;
+}
+
+.animate-float-slow {
+    animation: float-slow 6s ease-in-out infinite;
+    animation-delay: 2s;
+}
+
 /* Debug wrapper compatibility */
 [data-debug-wrapper="true"] {
     display: contents !important;
