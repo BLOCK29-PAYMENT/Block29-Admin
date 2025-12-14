@@ -176,6 +176,24 @@ class BatchReport(BaseModel):
     start_date: str
     end_date: str
 
+# ==================== AUDIT LOG HELPER ====================
+
+async def create_audit_log(user_id: str, user_email: str, action: str, resource_type: str, resource_id: str = None, details: dict = None):
+    """Create an audit log entry for tracking all admin actions"""
+    log_entry = {
+        "id": str(uuid.uuid4()),
+        "user_id": user_id,
+        "user_email": user_email,
+        "action": action,
+        "resource_type": resource_type,
+        "resource_id": resource_id,
+        "details": details or {},
+        "ip_address": "0.0.0.0",  # Would be captured from request in production
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    await db.audit_logs.insert_one(log_entry)
+    return log_entry
+
 # ==================== AUTH HELPERS ====================
 
 def hash_password(password: str) -> str:
