@@ -228,7 +228,7 @@ def main():
     test_results.append(("Admin Login", True))
     
     # Create test merchant for virtual terminal
-    success, _ = tester.test_create_merchant()
+    success = tester.test_create_merchant()
     test_results.append(("Create Merchant", success))
     
     # Virtual Terminal Tests
