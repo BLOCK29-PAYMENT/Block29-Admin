@@ -37,10 +37,13 @@ const navItems = [
   { path: '/merchants', label: 'Merchants', icon: Store },
   { path: '/varsheet', label: 'VAR Sheet Setup', icon: FileText, indent: true },
   { path: '/terminals', label: 'Terminals & Devices', icon: Monitor },
+  { path: '/virtual-terminal', label: 'Virtual Terminal', icon: CreditCard },
   { path: '/transactions', label: 'Transactions', icon: Receipt },
+  { path: '/reports', label: 'Reports', icon: BarChart3 },
   { path: '/block29', label: 'Block29 Gateway', icon: Zap },
   { path: '/affiliates', label: 'Affiliates & Agents', icon: Users },
   { path: '/users', label: 'Users & Roles', icon: UserCog },
+  { path: '/logs', label: 'System Logs', icon: ScrollText },
   { path: '/settings', label: 'Settings', icon: Settings },
 ];
 
