@@ -153,6 +153,29 @@ class TransactionCreate(BaseModel):
     card_type: str
     status: str = "pending"  # pending, approved, declined
 
+class VirtualTerminalTransaction(BaseModel):
+    merchant_id: str
+    transaction_type: str  # sale, authorization, refund
+    amount: float
+    card_number: str  # masked, only last 4 stored
+    card_expiry: str
+    card_cvv: str  # not stored
+    cardholder_name: str
+    customer_email: Optional[str] = None
+    customer_phone: Optional[str] = None
+    description: Optional[str] = None
+
+class AuditLogCreate(BaseModel):
+    action: str
+    resource_type: str
+    resource_id: Optional[str] = None
+    details: Optional[Dict[str, Any]] = None
+
+class BatchReport(BaseModel):
+    merchant_id: Optional[str] = None
+    start_date: str
+    end_date: str
+
 # ==================== AUTH HELPERS ====================
 
 def hash_password(password: str) -> str:
