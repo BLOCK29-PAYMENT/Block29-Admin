@@ -434,169 +434,27 @@ app = FastAPI(title="SalonBookin Admin API", lifespan=lifespan)
 api_router = APIRouter(prefix="/api")
 
 async def create_tables():
-    """Create all required database tables"""
-    tables = [
-        """
-        CREATE TABLE IF NOT EXISTS users (
-            id VARCHAR(36) PRIMARY KEY,
-            email VARCHAR(255) UNIQUE NOT NULL,
-            password VARCHAR(255) NOT NULL,
-            name VARCHAR(255) NOT NULL,
-            role ENUM('SUPER_ADMIN', 'OPERATIONS', 'SUPPORT', 'RISK', 'READ_ONLY') DEFAULT 'READ_ONLY',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS merchants (
-            id VARCHAR(36) PRIMARY KEY,
-            business_name VARCHAR(255) NOT NULL,
-            dba VARCHAR(255),
-            tax_id VARCHAR(50),
-            contact_email VARCHAR(255),
-            contact_phone VARCHAR(50),
-            address TEXT,
-            status ENUM('pending', 'active', 'suspended') DEFAULT 'pending',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by VARCHAR(36),
-            updated_at DATETIME
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS terminal_profiles (
-            id VARCHAR(36) PRIMARY KEY,
-            merchant_id VARCHAR(36) NOT NULL,
-            provider VARCHAR(50) DEFAULT 'tsys',
-            v_number VARCHAR(50),
-            merchant_number VARCHAR(50),
-            terminal_number VARCHAR(20),
-            terminal_status VARCHAR(20),
-            bin VARCHAR(20),
-            chain VARCHAR(20),
-            store_number VARCHAR(20),
-            agent_code VARCHAR(20),
-            edc_primary VARCHAR(50),
-            edc_secondary VARCHAR(50),
-            amex_se VARCHAR(50),
-            disc_se VARCHAR(50),
-            aba VARCHAR(20),
-            reimbursement_att VARCHAR(10),
-            card_types JSON,
-            networks JSON,
-            raw_comments TEXT,
-            provisioning_status ENUM('draft', 'ready', 'provisioned', 'live') DEFAULT 'draft',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by VARCHAR(36),
-            provisioned_at DATETIME,
-            provisioned_by VARCHAR(36),
-            live_at DATETIME,
-            live_by VARCHAR(36),
-            updated_at DATETIME
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS varsheet_uploads (
-            id VARCHAR(36) PRIMARY KEY,
-            merchant_id VARCHAR(36) NOT NULL,
-            provider VARCHAR(50) DEFAULT 'tsys',
-            file_path TEXT,
-            filename VARCHAR(255),
-            parsed_json JSON,
-            parse_status ENUM('pending', 'success', 'needs_review', 'failed') DEFAULT 'pending',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by VARCHAR(36),
-            parsed_at DATETIME,
-            updated_at DATETIME
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS pos_terminal_links (
-            id VARCHAR(36) PRIMARY KEY,
-            terminal_profile_id VARCHAR(36) NOT NULL,
-            pairing_token VARCHAR(255),
-            token_status ENUM('active', 'expired') DEFAULT 'active',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            expires_at DATETIME
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS block29_provisions (
-            id VARCHAR(36) PRIMARY KEY,
-            merchant_id VARCHAR(36) NOT NULL,
-            processor VARCHAR(50),
-            terminal_data JSON,
-            status VARCHAR(50) DEFAULT 'submitted',
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by VARCHAR(36)
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS agent_merchants (
-            id VARCHAR(36) PRIMARY KEY,
-            agent_id VARCHAR(36) NOT NULL,
-            merchant_id VARCHAR(36) NOT NULL,
-            commission_rate DECIMAL(5,2),
-            level INT DEFAULT 1,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            created_by VARCHAR(36)
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS transactions (
-            id VARCHAR(36) PRIMARY KEY,
-            merchant_id VARCHAR(36) NOT NULL,
-            terminal_id VARCHAR(50),
-            transaction_type VARCHAR(50) DEFAULT 'sale',
-            amount DECIMAL(10,2),
-            card_type VARCHAR(50),
-            card_last_four VARCHAR(4),
-            card_expiry VARCHAR(10),
-            cardholder_name VARCHAR(255),
-            customer_email VARCHAR(255),
-            customer_phone VARCHAR(50),
-            description TEXT,
-            status ENUM('pending', 'approved', 'declined') DEFAULT 'pending',
-            auth_code VARCHAR(20),
-            response_code VARCHAR(10),
-            response_message VARCHAR(255),
-            entry_mode VARCHAR(50),
-            original_transaction_id VARCHAR(36),
-            processed_by VARCHAR(36),
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        """,
-        """
-        CREATE TABLE IF NOT EXISTS audit_logs (
-            id VARCHAR(36) PRIMARY KEY,
-            user_id VARCHAR(36),
-            user_email VARCHAR(255),
-            action VARCHAR(50),
-            resource_type VARCHAR(50),
-            resource_id VARCHAR(36),
-            details JSON,
-            ip_address VARCHAR(50),
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        """
-    ]
+    """Create admin-specific tables if they don't exist (most tables already exist in the database)"""
+    # The database already has most tables with existing schema
+    # We only need to ensure admin-specific tables exist
     
-    for table_sql in tables:
-        try:
-            await execute_query(table_sql)
-        except Exception as e:
-            logger.error(f"Error creating table: {e}")
-    
-    # Create default admin user
+    # Check if admin user exists, if not create one
     admin = await fetch_one("SELECT id FROM users WHERE email = :email", {"email": "admin@salonbookin.com"})
     if not admin:
         await insert_row("users", {
             "id": str(uuid.uuid4()),
             "email": "admin@salonbookin.com",
-            "password": hash_password("admin123"),
-            "name": "Super Admin",
+            "password_hash": hash_password("admin123"),
+            "business_name": "SalonBookin Admin",
+            "phone_number": "",
             "role": "SUPER_ADMIN",
+            "is_active": 1,
+            "failed_login_attempts": 0,
             "created_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         })
         logger.info("Default admin user created: admin@salonbookin.com / admin123")
+    else:
+        logger.info("Admin user already exists")
 
 # ==================== AUTH ENDPOINTS ====================
 
