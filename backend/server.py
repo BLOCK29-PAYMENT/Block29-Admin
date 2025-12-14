@@ -1373,6 +1373,11 @@ async def startup():
     await db.merchants.create_index("id", unique=True)
     await db.terminal_profiles.create_index("id", unique=True)
     await db.varsheet_uploads.create_index("id", unique=True)
+    await db.audit_logs.create_index("timestamp")
+    await db.audit_logs.create_index("user_id")
+    await db.audit_logs.create_index("action")
+    await db.transactions.create_index("created_at")
+    await db.transactions.create_index("merchant_id")
     
     # Create default admin user if not exists
     admin = await db.users.find_one({"email": "admin@salonbookin.com"})
