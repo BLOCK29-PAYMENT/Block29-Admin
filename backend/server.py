@@ -750,12 +750,20 @@ async def create_transaction(transaction: TransactionCreate, user: dict = Depend
     }
     await db.transactions.insert_one(transaction_doc)
     transaction_doc.pop("_id", None)
+    
+    # Audit log
+    await create_audit_log(user["user_id"], user["email"], "CREATE", "transaction", transaction_doc["id"])
+    
     return transaction_doc
 
 @api_router.get("/transactions")
 async def list_transactions(
     merchant_id: Optional[str] = None,
     status: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    card_type: Optional[str] = None,
+    transaction_type: Optional[str] = None,
     user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))
 ):
     query = {}
@@ -763,9 +771,361 @@ async def list_transactions(
         query["merchant_id"] = merchant_id
     if status:
         query["status"] = status
+    if card_type:
+        query["card_type"] = card_type
+    if transaction_type:
+        query["transaction_type"] = transaction_type
+    if start_date:
+        query["created_at"] = {"$gte": start_date}
+    if end_date:
+        if "created_at" in query:
+            query["created_at"]["$lte"] = end_date
+        else:
+            query["created_at"] = {"$lte": end_date}
     
     transactions = await db.transactions.find(query, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return transactions
+
+# ==================== VIRTUAL TERMINAL ====================
+
+@api_router.post("/virtual-terminal/process")
+async def process_virtual_terminal(
+    transaction: VirtualTerminalTransaction,
+    user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))
+):
+    """Process a card-not-present transaction through the virtual terminal"""
+    # Verify merchant exists
+    merchant = await db.merchants.find_one({"id": transaction.merchant_id})
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+    
+    # Mask card number (only store last 4)
+    card_last_four = transaction.card_number[-4:] if len(transaction.card_number) >= 4 else "****"
+    
+    # Determine card type from card number
+    card_number = transaction.card_number.replace(" ", "").replace("-", "")
+    if card_number.startswith("4"):
+        card_brand = "VISA"
+    elif card_number.startswith(("51", "52", "53", "54", "55")):
+        card_brand = "MasterCard"
+    elif card_number.startswith(("34", "37")):
+        card_brand = "AMEX"
+    elif card_number.startswith("6011"):
+        card_brand = "Discover"
+    else:
+        card_brand = "Unknown"
+    
+    # Simulate transaction processing (in production, this would call actual processor)
+    import random
+    is_approved = random.random() > 0.1  # 90% approval rate simulation
+    
+    auth_code = str(uuid.uuid4())[:8].upper() if is_approved else None
+    
+    transaction_doc = {
+        "id": str(uuid.uuid4()),
+        "merchant_id": transaction.merchant_id,
+        "terminal_id": "VIRTUAL",
+        "transaction_type": transaction.transaction_type,
+        "amount": transaction.amount,
+        "card_type": card_brand,
+        "card_last_four": card_last_four,
+        "card_expiry": transaction.card_expiry,
+        "cardholder_name": transaction.cardholder_name,
+        "customer_email": transaction.customer_email,
+        "customer_phone": transaction.customer_phone,
+        "description": transaction.description,
+        "status": "approved" if is_approved else "declined",
+        "auth_code": auth_code,
+        "response_code": "00" if is_approved else "05",
+        "response_message": "APPROVED" if is_approved else "DECLINED - Do Not Honor",
+        "entry_mode": "KEYED",
+        "processed_by": user["user_id"],
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.transactions.insert_one(transaction_doc)
+    transaction_doc.pop("_id", None)
+    
+    # Audit log
+    await create_audit_log(
+        user["user_id"], 
+        user["email"], 
+        "VIRTUAL_TERMINAL", 
+        "transaction", 
+        transaction_doc["id"],
+        {"amount": transaction.amount, "status": transaction_doc["status"], "card_brand": card_brand}
+    )
+    
+    return transaction_doc
+
+@api_router.post("/virtual-terminal/refund/{transaction_id}")
+async def process_refund(
+    transaction_id: str,
+    amount: Optional[float] = None,
+    user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))
+):
+    """Process a refund for an existing transaction"""
+    original_tx = await db.transactions.find_one({"id": transaction_id})
+    if not original_tx:
+        raise HTTPException(status_code=404, detail="Original transaction not found")
+    
+    if original_tx["status"] != "approved":
+        raise HTTPException(status_code=400, detail="Can only refund approved transactions")
+    
+    refund_amount = amount if amount else original_tx["amount"]
+    if refund_amount > original_tx["amount"]:
+        raise HTTPException(status_code=400, detail="Refund amount cannot exceed original amount")
+    
+    refund_doc = {
+        "id": str(uuid.uuid4()),
+        "merchant_id": original_tx["merchant_id"],
+        "terminal_id": "VIRTUAL",
+        "transaction_type": "refund",
+        "amount": refund_amount,
+        "card_type": original_tx.get("card_type"),
+        "card_last_four": original_tx.get("card_last_four"),
+        "original_transaction_id": transaction_id,
+        "status": "approved",
+        "auth_code": str(uuid.uuid4())[:8].upper(),
+        "response_code": "00",
+        "response_message": "REFUND APPROVED",
+        "entry_mode": "KEYED",
+        "processed_by": user["user_id"],
+        "created_at": datetime.now(timezone.utc).isoformat()
+    }
+    
+    await db.transactions.insert_one(refund_doc)
+    refund_doc.pop("_id", None)
+    
+    # Audit log
+    await create_audit_log(
+        user["user_id"], 
+        user["email"], 
+        "REFUND", 
+        "transaction", 
+        refund_doc["id"],
+        {"original_tx": transaction_id, "amount": refund_amount}
+    )
+    
+    return refund_doc
+
+# ==================== REPORTS ====================
+
+@api_router.get("/reports/transactions")
+async def get_transaction_report(
+    start_date: str,
+    end_date: str,
+    merchant_id: Optional[str] = None,
+    card_type: Optional[str] = None,
+    status: Optional[str] = None,
+    user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))
+):
+    """Generate transaction report with filters"""
+    query = {
+        "created_at": {"$gte": start_date, "$lte": end_date}
+    }
+    if merchant_id:
+        query["merchant_id"] = merchant_id
+    if card_type:
+        query["card_type"] = card_type
+    if status:
+        query["status"] = status
+    
+    transactions = await db.transactions.find(query, {"_id": 0}).sort("created_at", -1).to_list(10000)
+    
+    # Calculate summary
+    total_amount = sum(tx.get("amount", 0) for tx in transactions)
+    approved_count = sum(1 for tx in transactions if tx.get("status") == "approved")
+    declined_count = sum(1 for tx in transactions if tx.get("status") == "declined")
+    refund_amount = sum(tx.get("amount", 0) for tx in transactions if tx.get("transaction_type") == "refund")
+    
+    # Group by card type
+    by_card_type = {}
+    for tx in transactions:
+        ct = tx.get("card_type", "Unknown")
+        if ct not in by_card_type:
+            by_card_type[ct] = {"count": 0, "amount": 0}
+        by_card_type[ct]["count"] += 1
+        by_card_type[ct]["amount"] += tx.get("amount", 0)
+    
+    return {
+        "summary": {
+            "total_transactions": len(transactions),
+            "total_amount": round(total_amount, 2),
+            "approved_count": approved_count,
+            "declined_count": declined_count,
+            "refund_amount": round(refund_amount, 2),
+            "approval_rate": round((approved_count / len(transactions) * 100), 2) if transactions else 0
+        },
+        "by_card_type": by_card_type,
+        "transactions": transactions,
+        "report_generated": datetime.now(timezone.utc).isoformat()
+    }
+
+@api_router.get("/reports/batches")
+async def get_batch_report(
+    start_date: str,
+    end_date: str,
+    merchant_id: Optional[str] = None,
+    user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))
+):
+    """Generate batch/settlement report grouped by day"""
+    query = {
+        "created_at": {"$gte": start_date, "$lte": end_date},
+        "status": "approved"
+    }
+    if merchant_id:
+        query["merchant_id"] = merchant_id
+    
+    transactions = await db.transactions.find(query, {"_id": 0}).sort("created_at", 1).to_list(10000)
+    
+    # Group by date
+    batches = {}
+    for tx in transactions:
+        date_str = tx["created_at"][:10]  # Extract YYYY-MM-DD
+        if date_str not in batches:
+            batches[date_str] = {
+                "date": date_str,
+                "transaction_count": 0,
+                "sales_count": 0,
+                "sales_amount": 0,
+                "refund_count": 0,
+                "refund_amount": 0,
+                "net_amount": 0
+            }
+        
+        batches[date_str]["transaction_count"] += 1
+        
+        if tx.get("transaction_type") == "refund":
+            batches[date_str]["refund_count"] += 1
+            batches[date_str]["refund_amount"] += tx.get("amount", 0)
+        else:
+            batches[date_str]["sales_count"] += 1
+            batches[date_str]["sales_amount"] += tx.get("amount", 0)
+    
+    # Calculate net amounts
+    for batch in batches.values():
+        batch["net_amount"] = round(batch["sales_amount"] - batch["refund_amount"], 2)
+        batch["sales_amount"] = round(batch["sales_amount"], 2)
+        batch["refund_amount"] = round(batch["refund_amount"], 2)
+    
+    batch_list = sorted(batches.values(), key=lambda x: x["date"], reverse=True)
+    
+    # Summary totals
+    total_sales = sum(b["sales_amount"] for b in batch_list)
+    total_refunds = sum(b["refund_amount"] for b in batch_list)
+    
+    return {
+        "summary": {
+            "total_batches": len(batch_list),
+            "total_sales": round(total_sales, 2),
+            "total_refunds": round(total_refunds, 2),
+            "net_settlement": round(total_sales - total_refunds, 2)
+        },
+        "batches": batch_list,
+        "report_generated": datetime.now(timezone.utc).isoformat()
+    }
+
+@api_router.get("/reports/settlement")
+async def get_settlement_report(
+    start_date: str,
+    end_date: str,
+    user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))
+):
+    """Generate settlement report grouped by merchant"""
+    query = {
+        "created_at": {"$gte": start_date, "$lte": end_date},
+        "status": "approved"
+    }
+    
+    transactions = await db.transactions.find(query, {"_id": 0}).to_list(10000)
+    merchants = await db.merchants.find({}, {"_id": 0}).to_list(1000)
+    merchant_map = {m["id"]: m for m in merchants}
+    
+    # Group by merchant
+    settlements = {}
+    for tx in transactions:
+        mid = tx.get("merchant_id")
+        if mid not in settlements:
+            merchant = merchant_map.get(mid, {})
+            settlements[mid] = {
+                "merchant_id": mid,
+                "merchant_name": merchant.get("business_name", "Unknown"),
+                "transaction_count": 0,
+                "gross_amount": 0,
+                "refund_amount": 0,
+                "net_amount": 0,
+                "fee_amount": 0  # Would be calculated based on merchant rate
+            }
+        
+        if tx.get("transaction_type") == "refund":
+            settlements[mid]["refund_amount"] += tx.get("amount", 0)
+        else:
+            settlements[mid]["gross_amount"] += tx.get("amount", 0)
+        settlements[mid]["transaction_count"] += 1
+    
+    # Calculate net and fees (2.9% + $0.30 example rate)
+    for s in settlements.values():
+        s["net_amount"] = round(s["gross_amount"] - s["refund_amount"], 2)
+        s["fee_amount"] = round(s["gross_amount"] * 0.029 + (s["transaction_count"] * 0.30), 2)
+        s["payout_amount"] = round(s["net_amount"] - s["fee_amount"], 2)
+        s["gross_amount"] = round(s["gross_amount"], 2)
+        s["refund_amount"] = round(s["refund_amount"], 2)
+    
+    settlement_list = sorted(settlements.values(), key=lambda x: x["net_amount"], reverse=True)
+    
+    total_gross = sum(s["gross_amount"] for s in settlement_list)
+    total_fees = sum(s["fee_amount"] for s in settlement_list)
+    total_payout = sum(s["payout_amount"] for s in settlement_list)
+    
+    return {
+        "summary": {
+            "total_merchants": len(settlement_list),
+            "total_gross": round(total_gross, 2),
+            "total_fees": round(total_fees, 2),
+            "total_payout": round(total_payout, 2)
+        },
+        "settlements": settlement_list,
+        "report_generated": datetime.now(timezone.utc).isoformat()
+    }
+
+@api_router.get("/reports/export")
+async def export_transactions_csv(
+    start_date: str,
+    end_date: str,
+    merchant_id: Optional[str] = None,
+    user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))
+):
+    """Export transactions as CSV-ready data"""
+    query = {
+        "created_at": {"$gte": start_date, "$lte": end_date}
+    }
+    if merchant_id:
+        query["merchant_id"] = merchant_id
+    
+    transactions = await db.transactions.find(query, {"_id": 0}).sort("created_at", -1).to_list(10000)
+    
+    # Format for CSV export
+    csv_data = []
+    for tx in transactions:
+        csv_data.append({
+            "Transaction ID": tx.get("id"),
+            "Date": tx.get("created_at", "")[:19],
+            "Merchant ID": tx.get("merchant_id"),
+            "Type": tx.get("transaction_type", "sale"),
+            "Amount": tx.get("amount"),
+            "Card Type": tx.get("card_type"),
+            "Card Last 4": tx.get("card_last_four", "****"),
+            "Status": tx.get("status"),
+            "Auth Code": tx.get("auth_code", ""),
+            "Entry Mode": tx.get("entry_mode", ""),
+            "Cardholder": tx.get("cardholder_name", "")
+        })
+    
+    # Audit log
+    await create_audit_log(user["user_id"], user["email"], "EXPORT", "report", None, {"type": "transactions", "count": len(csv_data)})
+    
+    return {"data": csv_data, "count": len(csv_data)}
 
 # ==================== DASHBOARD STATS ====================
 
