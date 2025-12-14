@@ -50,10 +50,13 @@ function App() {
                     <Route path="/merchants" element={<MerchantsPage />} />
                     <Route path="/varsheet" element={<VarSheetPage />} />
                     <Route path="/terminals" element={<TerminalsPage />} />
+                    <Route path="/virtual-terminal" element={<VirtualTerminalPage />} />
                     <Route path="/transactions" element={<TransactionsPage />} />
+                    <Route path="/reports" element={<ReportsPage />} />
                     <Route path="/block29" element={<Block29Page />} />
                     <Route path="/affiliates" element={<AffiliatesPage />} />
                     <Route path="/users" element={<UsersPage />} />
+                    <Route path="/logs" element={<SystemLogsPage />} />
                     <Route path="/settings" element={<SettingsPage />} />
                   </Routes>
                 </Layout>
