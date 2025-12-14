@@ -11,6 +11,9 @@ import Block29Page from "./pages/Block29Page";
 import AffiliatesPage from "./pages/AffiliatesPage";
 import UsersPage from "./pages/UsersPage";
 import SettingsPage from "./pages/SettingsPage";
+import VirtualTerminalPage from "./pages/VirtualTerminalPage";
+import ReportsPage from "./pages/ReportsPage";
+import SystemLogsPage from "./pages/SystemLogsPage";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 
 const ProtectedRoute = ({ children }) => {
