@@ -227,57 +227,319 @@ def require_roles(*allowed_roles):
         return user
     return role_checker
 
-# ==================== VAR PARSER ====================
+# ==================== VAR PARSER (TSYS Format) ====================
 
 def parse_var_sheet_text(text: str) -> Dict[str, Any]:
-    """Parse VAR sheet text and extract key fields using enhanced regex patterns"""
+    """Parse TSYS VAR Form / Express Keysheets and extract all fields"""
     parsed = {
+        # Header Info
+        "document_type": "TSYS VAR Form / Express Keysheets",
+        "date_time": None,
+        "support_phone": None,
+        
+        # Merchant Info
         "merchant_name": None,
-        "v_number": None,
         "merchant_number": None,
+        "v_number_primary": None,
+        "v_number_secondary": None,
+        "terminal_status": None,
+        
+        # Terminal Info
         "terminal_number": None,
         "bin": None,
+        "agent": None,
         "chain": None,
         "store_number": None,
+        
+        # Location Info
+        "street_address": None,
+        "city": None,
+        "state": None,
+        "postal_code": None,
+        "phone": None,
+        "contact_name": None,
+        "country": None,
+        "currency_code": None,
+        "time_zone": None,
+        "time_zone_differential": None,
+        "location_number": None,
+        
+        # Industry
+        "visa_mcc": None,
+        "industry_type": None,  # retail, restaurant, qsr, lodging, direct_marketing
+        
+        # Card Types
         "card_types": [],
+        
+        # EDC/Auth
+        "edc_primary": None,
+        "edc_secondary": None,
+        "auth_primary": None,
+        "auth_secondary": None,
+        "security_code": None,
+        "pin_pad_type": None,
+        "encryption": None,
+        
+        # Debit Information
+        "merchant_aba": None,
+        "reimbursement_attribute": None,
+        "merchant_settlement_agent": None,
+        "cashback": None,
+        "ebt_fcsid": None,
+        
+        # Networks
         "networks": [],
+        
+        # Host Capture
+        "host_capture_participant": None,
+        "host_capture_times": [],
+        "hc_pos_id": None,
+        
+        # Comments (critical financial info)
         "amex_se": None,
         "disc_se": None,
         "aba": None,
-        "agent_code": None,
-        "edc_primary": None,
-        "edc_secondary": None,
         "reimbursement_att": None,
         "raw_comments": None,
+        
+        # Extraction metadata
         "confidence_flags": {},
-        "extraction_notes": []
+        "extraction_notes": [],
+        "confidence_score": 0
     }
     
-    # Enhanced pattern matching for common VAR sheet fields
-    patterns = {
-        "v_number": [
-            r"V[\s-]?Number[:\s]+([A-Z0-9]+)",
-            r"V#[:\s]*([A-Z0-9]+)",
-            r"VNum[:\s]*([A-Z0-9]+)"
-        ],
-        "merchant_number": [
-            r"Merchant[\s-]?(?:Number|#|ID)[:\s]+([A-Z0-9]+)",
-            r"MID[:\s]+([A-Z0-9]+)",
-            r"Merch[\s-]?#[:\s]*([A-Z0-9]+)"
-        ],
-        "terminal_number": [
-            r"Terminal[\s-]?(?:Number|#|ID)[:\s]+([A-Z0-9]+)",
-            r"TID[:\s]+([A-Z0-9]+)",
-            r"Term[\s-]?#[:\s]*([A-Z0-9]+)"
-        ],
-        "bin": [
-            r"BIN[:\s]+([0-9]{4,6})",
-            r"Bank[\s-]?ID[:\s]+([0-9]+)"
-        ],
-        "chain": [
-            r"Chain[:\s]+([A-Z0-9]+)",
-            r"Chain[\s-]?(?:Number|#|ID)[:\s]+([A-Z0-9]+)"
-        ],
+    # Clean text
+    text = text.replace('\r', '\n')
+    
+    # ========== MERCHANT INFO ==========
+    # Merchant Name
+    name_patterns = [
+        r"Merchant\s+Name[:\s]+([A-Za-z0-9\s&.,'\-]+?)(?:\n|Merchant\s+Number)",
+        r"DBA[:\s]+([A-Za-z0-9\s&.,'\-]+?)(?:\n|$)",
+    ]
+    for pattern in name_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            parsed["merchant_name"] = match.group(1).strip()
+            parsed["confidence_flags"]["merchant_name"] = "high"
+            break
+    
+    # Merchant Number (12-digit typically)
+    mn_match = re.search(r"Merchant\s*(?:Number|#)?[:\s]*(\d{9,15})", text, re.IGNORECASE)
+    if mn_match:
+        parsed["merchant_number"] = mn_match.group(1).strip()
+        parsed["confidence_flags"]["merchant_number"] = "high"
+    
+    # V Numbers (Primary and Secondary) - format V followed by 7 digits
+    v_matches = re.findall(r"V[\s-]?(?:Number)?[:\s]*(V\d{7})", text, re.IGNORECASE)
+    if v_matches:
+        parsed["v_number_primary"] = v_matches[0]
+        if len(v_matches) > 1:
+            parsed["v_number_secondary"] = v_matches[1]
+        parsed["confidence_flags"]["v_number"] = "high"
+    
+    # Terminal Status
+    status_match = re.search(r"Terminal\s*Status[:\s]*(\w+)", text, re.IGNORECASE)
+    if status_match:
+        parsed["terminal_status"] = status_match.group(1).strip()
+    
+    # ========== TERMINAL INFO ==========
+    # Terminal Number
+    term_match = re.search(r"Terminal\s*#?[:\s]*(\d{4})", text, re.IGNORECASE)
+    if term_match:
+        parsed["terminal_number"] = term_match.group(1)
+        parsed["confidence_flags"]["terminal_number"] = "high"
+    
+    # BIN (6 digits)
+    bin_match = re.search(r"BIN[:\s]*(\d{6})", text, re.IGNORECASE)
+    if bin_match:
+        parsed["bin"] = bin_match.group(1)
+        parsed["confidence_flags"]["bin"] = "high"
+    
+    # Agent
+    agent_match = re.search(r"Agent[:\s]*(\d{6})", text, re.IGNORECASE)
+    if agent_match:
+        parsed["agent"] = agent_match.group(1)
+    
+    # Chain
+    chain_match = re.search(r"Chain[:\s]*(\d{6})", text, re.IGNORECASE)
+    if chain_match:
+        parsed["chain"] = chain_match.group(1)
+        parsed["confidence_flags"]["chain"] = "high"
+    
+    # Store Number
+    store_match = re.search(r"Store\s*(?:Number|#)?[:\s]*(\d{4})", text, re.IGNORECASE)
+    if store_match:
+        parsed["store_number"] = store_match.group(1)
+        parsed["confidence_flags"]["store_number"] = "high"
+    
+    # ========== LOCATION INFO ==========
+    # Street Address
+    addr_match = re.search(r"Street\s*Address[:\s]*(.+?)(?:\n|City)", text, re.IGNORECASE)
+    if addr_match:
+        parsed["street_address"] = addr_match.group(1).strip()
+    
+    # City, State, Postal
+    city_match = re.search(r"City[:\s]*([A-Za-z\s]+?)(?:\n|State)", text, re.IGNORECASE)
+    if city_match:
+        parsed["city"] = city_match.group(1).strip()
+    
+    state_match = re.search(r"State[:\s]*([A-Z]{2})", text, re.IGNORECASE)
+    if state_match:
+        parsed["state"] = state_match.group(1).upper()
+    
+    postal_match = re.search(r"(?:Postal|Zip)\s*(?:Code)?[:\s]*(\d{5}(?:-\d{4})?)", text, re.IGNORECASE)
+    if postal_match:
+        parsed["postal_code"] = postal_match.group(1)
+    
+    # Phone
+    phone_match = re.search(r"Phone\s*(?:Number)?[:\s]*\(?(\d{3})\)?[\s.-]*(\d{3})[\s.-]*(\d{4})", text, re.IGNORECASE)
+    if phone_match:
+        parsed["phone"] = f"({phone_match.group(1)}){phone_match.group(2)}-{phone_match.group(3)}"
+    
+    # Country
+    country_match = re.search(r"Country[:\s]*([A-Z]{2})", text, re.IGNORECASE)
+    if country_match:
+        parsed["country"] = country_match.group(1).upper()
+    
+    # Currency Code
+    currency_match = re.search(r"Currency\s*Code[:\s]*(\d{3})", text, re.IGNORECASE)
+    if currency_match:
+        parsed["currency_code"] = currency_match.group(1)
+    
+    # Time Zone
+    tz_match = re.search(r"Time\s*Zone\s*(?:Code)?[:\s]*(Pacific|Eastern|Central|Mountain|Alaska|Hawaii)", text, re.IGNORECASE)
+    if tz_match:
+        parsed["time_zone"] = tz_match.group(1)
+    
+    tz_diff_match = re.search(r"Time\s*Zone\s*Differential[:\s]*(\d{3})", text, re.IGNORECASE)
+    if tz_diff_match:
+        parsed["time_zone_differential"] = tz_diff_match.group(1)
+    
+    # Location Number
+    loc_match = re.search(r"Location\s*(?:Number|#)?[:\s]*(\d{6})", text, re.IGNORECASE)
+    if loc_match:
+        parsed["location_number"] = loc_match.group(1)
+    
+    # ========== INDUSTRY ==========
+    # VISA MCC
+    mcc_match = re.search(r"VISA\s*MCC[:\s]*(\d{4})", text, re.IGNORECASE)
+    if mcc_match:
+        parsed["visa_mcc"] = mcc_match.group(1)
+    
+    # Industry Type
+    if re.search(r"Industry.*Retail.*\[X\]", text, re.IGNORECASE):
+        parsed["industry_type"] = "Retail"
+    elif re.search(r"Industry.*Restaurant.*\[X\]", text, re.IGNORECASE):
+        parsed["industry_type"] = "Restaurant"
+    elif re.search(r"Industry.*QSR.*\[X\]", text, re.IGNORECASE):
+        parsed["industry_type"] = "QSR"
+    elif re.search(r"Industry.*Lodging.*\[X\]", text, re.IGNORECASE):
+        parsed["industry_type"] = "Lodging"
+    elif re.search(r"Industry.*Direct\s*Marketing.*\[X\]", text, re.IGNORECASE):
+        parsed["industry_type"] = "Direct Marketing"
+    
+    # ========== CARD TYPES ==========
+    card_type_match = re.search(r"Card\s*Type\s*(?:Accepted)?[:\s]*(.+?)(?:\n|EDC)", text, re.IGNORECASE | re.DOTALL)
+    if card_type_match:
+        card_str = card_type_match.group(1)
+        cards = []
+        if re.search(r"VISA", card_str, re.IGNORECASE):
+            cards.append("VISA")
+        if re.search(r"MASTER\s*CARD|MC", card_str, re.IGNORECASE):
+            cards.append("MasterCard")
+        if re.search(r"AMERICAN\s*EXPRESS|AMEX", card_str, re.IGNORECASE):
+            cards.append("American Express")
+        if re.search(r"JCB", card_str, re.IGNORECASE):
+            cards.append("JCB")
+        if re.search(r"DISCOVER", card_str, re.IGNORECASE):
+            cards.append("Discover")
+        if re.search(r"ATM|DEBIT", card_str, re.IGNORECASE):
+            cards.append("ATM/Debit")
+        parsed["card_types"] = cards
+        parsed["confidence_flags"]["card_types"] = "high"
+    
+    # ========== EDC/AUTH ==========
+    edc_pri_match = re.search(r"EDC\s*Primary[:\s]*(\d{11})", text, re.IGNORECASE)
+    if edc_pri_match:
+        parsed["edc_primary"] = edc_pri_match.group(1)
+    
+    edc_sec_match = re.search(r"EDC\s*Secondary[:\s]*(\d{11})", text, re.IGNORECASE)
+    if edc_sec_match:
+        parsed["edc_secondary"] = edc_sec_match.group(1)
+    
+    # ========== NETWORKS ==========
+    networks = []
+    network_patterns = [
+        (r"L-?Pulse", "Pulse"),
+        (r"G-?Interlink", "Interlink"),
+        (r"W-?Star", "Star West"),
+        (r"Z-?Star", "Star"),
+        (r"Q-?Star", "Star"),
+        (r"8-?Maestro", "Maestro"),
+        (r"Y-?NYCE", "NYCE"),
+        (r"E-?ACCEL", "ACCEL"),
+        (r"K-?EBT\s*POS", "EBT POS"),
+        (r"V-?Visa/?PAVD", "Visa PAVD"),
+        (r"\bSTAR\b", "STAR"),
+        (r"\bPLUS\b", "PLUS"),
+        (r"\bCirrus\b", "Cirrus"),
+        (r"\bShazam\b", "Shazam"),
+    ]
+    for pattern, name in network_patterns:
+        if re.search(pattern, text, re.IGNORECASE) and name not in networks:
+            networks.append(name)
+    parsed["networks"] = networks
+    if networks:
+        parsed["confidence_flags"]["networks"] = "high"
+    
+    # ========== HOST CAPTURE ==========
+    hc_match = re.search(r"Host\s*Capture\s*Participant\s*(?:Indicator)?[:\s]*\[?([YN])\]?", text, re.IGNORECASE)
+    if hc_match:
+        parsed["host_capture_participant"] = hc_match.group(1).upper()
+    
+    # ========== COMMENTS (Critical Financial Info) ==========
+    comments_match = re.search(r"Comments.*?[:\s]*(.+?)(?:Please\s*note|Confidential|$)", text, re.IGNORECASE | re.DOTALL)
+    if comments_match:
+        comments = comments_match.group(1).strip()
+        parsed["raw_comments"] = comments[:500]
+        
+        # Extract AMEX SE
+        amex_match = re.search(r"AMEX\s*SE[:\s]*(\d{10})", comments, re.IGNORECASE)
+        if amex_match:
+            parsed["amex_se"] = amex_match.group(1)
+            parsed["confidence_flags"]["amex_se"] = "high"
+        
+        # Extract DISC SE (can be longer)
+        disc_match = re.search(r"DISC\s*SE[:\s]*(\d{12,15})", comments, re.IGNORECASE)
+        if disc_match:
+            parsed["disc_se"] = disc_match.group(1)
+            parsed["confidence_flags"]["disc_se"] = "high"
+        
+        # Extract ABA (9 digits)
+        aba_match = re.search(r"ABA[:\s]*(\d{9})", comments, re.IGNORECASE)
+        if aba_match:
+            parsed["aba"] = aba_match.group(1)
+            parsed["confidence_flags"]["aba"] = "high"
+        
+        # Extract Reimbursement ATT
+        reimb_match = re.search(r"Reimbursement\s*ATT[:\s]*([A-Z])", comments, re.IGNORECASE)
+        if reimb_match:
+            parsed["reimbursement_att"] = reimb_match.group(1).upper()
+    
+    # ========== CALCULATE CONFIDENCE ==========
+    critical_fields = ["merchant_name", "merchant_number", "v_number", "terminal_number", "bin", "chain", "store_number", "card_types", "networks", "aba"]
+    found = sum(1 for f in critical_fields if parsed["confidence_flags"].get(f) == "high")
+    parsed["confidence_score"] = round((found / len(critical_fields)) * 100, 1)
+    
+    # Add extraction notes
+    parsed["extraction_notes"].append(f"Extracted {found}/{len(critical_fields)} critical fields")
+    if parsed["merchant_name"]:
+        parsed["extraction_notes"].append(f"Merchant: {parsed['merchant_name']}")
+    if parsed["networks"]:
+        parsed["extraction_notes"].append(f"Networks: {', '.join(parsed['networks'])}")
+    
+    return parsed
         "store_number": [
             r"Store[\s-]?(?:Number|#)[:\s]+([A-Z0-9]+)",
             r"Location[\s-]?#[:\s]*([A-Z0-9]+)"
