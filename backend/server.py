@@ -1160,49 +1160,108 @@ async def get_dashboard_stats(user: dict = Depends(get_current_user)):
         }
     }
 
-# ==================== SYSTEM LOGS ====================
+# ==================== SYSTEM LOGS (AUDIT TRAIL) ====================
 
 @api_router.get("/logs")
 async def get_system_logs(
     limit: int = 100,
+    action: Optional[str] = None,
+    resource_type: Optional[str] = None,
+    user_id: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
     user: dict = Depends(require_roles("SUPER_ADMIN"))
 ):
-    # Aggregate logs from different collections
-    logs = []
+    """Get audit trail logs with filters"""
+    query = {}
+    if action:
+        query["action"] = action
+    if resource_type:
+        query["resource_type"] = resource_type
+    if user_id:
+        query["user_id"] = user_id
+    if start_date:
+        query["timestamp"] = {"$gte": start_date}
+    if end_date:
+        if "timestamp" in query:
+            query["timestamp"]["$lte"] = end_date
+        else:
+            query["timestamp"] = {"$lte": end_date}
     
-    # Get recent varsheet uploads
-    varsheets = await db.varsheet_uploads.find({}, {"_id": 0}).sort("created_at", -1).to_list(limit // 3)
-    for v in varsheets:
-        logs.append({
-            "type": "varsheet_upload",
-            "id": v["id"],
-            "description": f"VAR sheet uploaded: {v.get('filename', 'Unknown')}",
-            "timestamp": v["created_at"]
+    # Get audit logs
+    audit_logs = await db.audit_logs.find(query, {"_id": 0}).sort("timestamp", -1).to_list(limit)
+    
+    # Also get activity from other collections if no filters
+    if not query:
+        logs = audit_logs.copy()
+        
+        # Get recent varsheet uploads
+        varsheets = await db.varsheet_uploads.find({}, {"_id": 0}).sort("created_at", -1).to_list(limit // 4)
+        for v in varsheets:
+            logs.append({
+                "id": v["id"],
+                "action": "UPLOAD",
+                "resource_type": "varsheet",
+                "resource_id": v["id"],
+                "user_email": v.get("created_by", "system"),
+                "details": {"filename": v.get("filename", "Unknown")},
+                "timestamp": v["created_at"]
+            })
+        
+        # Get recent provisions
+        provisions = await db.block29_provisions.find({}, {"_id": 0}).sort("created_at", -1).to_list(limit // 4)
+        for p in provisions:
+            logs.append({
+                "id": p["id"],
+                "action": "PROVISION",
+                "resource_type": "block29",
+                "resource_id": p["id"],
+                "user_email": p.get("created_by", "system"),
+                "details": {"processor": p["processor"]},
+                "timestamp": p["created_at"]
+            })
+        
+        # Sort all logs by timestamp
+        logs.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+        return logs[:limit]
+    
+    return audit_logs
+
+@api_router.get("/logs/actions")
+async def get_log_action_types(user: dict = Depends(require_roles("SUPER_ADMIN"))):
+    """Get distinct action types for filtering"""
+    actions = await db.audit_logs.distinct("action")
+    resource_types = await db.audit_logs.distinct("resource_type")
+    return {
+        "actions": actions or ["CREATE", "UPDATE", "DELETE", "VIRTUAL_TERMINAL", "REFUND", "EXPORT", "LOGIN"],
+        "resource_types": resource_types or ["merchant", "terminal", "transaction", "varsheet", "user", "report"]
+    }
+
+@api_router.get("/logs/export")
+async def export_audit_logs(
+    start_date: str,
+    end_date: str,
+    user: dict = Depends(require_roles("SUPER_ADMIN"))
+):
+    """Export audit logs for compliance"""
+    query = {
+        "timestamp": {"$gte": start_date, "$lte": end_date}
+    }
+    logs = await db.audit_logs.find(query, {"_id": 0}).sort("timestamp", -1).to_list(10000)
+    
+    csv_data = []
+    for log in logs:
+        csv_data.append({
+            "Timestamp": log.get("timestamp"),
+            "User": log.get("user_email"),
+            "Action": log.get("action"),
+            "Resource Type": log.get("resource_type"),
+            "Resource ID": log.get("resource_id", ""),
+            "IP Address": log.get("ip_address", ""),
+            "Details": json.dumps(log.get("details", {}))
         })
     
-    # Get recent provisions
-    provisions = await db.block29_provisions.find({}, {"_id": 0}).sort("created_at", -1).to_list(limit // 3)
-    for p in provisions:
-        logs.append({
-            "type": "provision",
-            "id": p["id"],
-            "description": f"Block29 provision for {p['processor']}",
-            "timestamp": p["created_at"]
-        })
-    
-    # Get recent terminal status changes
-    terminals = await db.terminal_profiles.find({}, {"_id": 0}).sort("created_at", -1).to_list(limit // 3)
-    for t in terminals:
-        logs.append({
-            "type": "terminal",
-            "id": t["id"],
-            "description": f"Terminal {t.get('terminal_number', 'N/A')} - {t['provisioning_status']}",
-            "timestamp": t["created_at"]
-        })
-    
-    # Sort all logs by timestamp
-    logs.sort(key=lambda x: x["timestamp"], reverse=True)
-    return logs[:limit]
+    return {"data": csv_data, "count": len(csv_data)}
 
 # ==================== ROOT ENDPOINT ====================
 
