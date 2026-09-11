@@ -68,6 +68,7 @@ export default function TransactionsPage() {
         end_date: (endDate || new Date().toISOString().split('T')[0]) + 'T23:59:59'
       });
       if (merchantFilter !== 'all') params.append('merchant_id', merchantFilter);
+      if (statusFilter !== 'all') params.append('status', statusFilter);
 
       const response = await axios.get(`${API}/reports/export?${params}`);
       const data = response.data.data;

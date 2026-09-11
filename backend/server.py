@@ -1093,13 +1093,16 @@ async def get_batch_report(start_date: str, end_date: str, merchant_id: Optional
     }
 
 @api_router.get("/reports/export")
-async def export_transactions_csv(start_date: str, end_date: str, merchant_id: Optional[str] = None, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
+async def export_transactions_csv(start_date: str, end_date: str, merchant_id: Optional[str] = None, status: Optional[str] = None, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
     query = "SELECT * FROM transactions WHERE created_at >= :start_date AND created_at <= :end_date"
     params = {"start_date": start_date, "end_date": end_date}
-    
+
     if merchant_id:
         query += " AND merchant_id = :merchant_id"
         params["merchant_id"] = merchant_id
+    if status:
+        query += " AND status = :status"
+        params["status"] = status
     
     # Bounded export: cap at 10,000 rows to avoid unbounded memory/response size
     query += " ORDER BY created_at DESC LIMIT 10000"

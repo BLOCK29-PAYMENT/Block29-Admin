@@ -28,7 +28,7 @@ import {
 } from '../components/ui/dropdown-menu';
 import Pagination from '../components/Pagination';
 import { toast } from 'sonner';
-import { Plus, Search, MoreVertical, Monitor, Zap, CheckCircle, RefreshCw, Info } from 'lucide-react';
+import { Plus, Search, MoreVertical, Monitor, Zap, CheckCircle, RefreshCw, Info, Edit } from 'lucide-react';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -42,6 +42,7 @@ export default function TerminalsPage() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [editingTerminal, setEditingTerminal] = useState(null);
   const [formData, setFormData] = useState({
     merchant_id: '',
     terminal_number: '',
@@ -93,18 +94,38 @@ export default function TerminalsPage() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
-      await axios.post(`${API}/admin/terminals`, {
-        ...formData,
-        provider: 'tsys',
-        provisioning_status: 'draft'
-      });
-      toast.success('Terminal created successfully');
+      if (editingTerminal) {
+        const { merchant_id, ...updateData } = formData;
+        await axios.put(`${API}/admin/terminals/${editingTerminal.id}`, updateData);
+        toast.success('Terminal updated');
+      } else {
+        await axios.post(`${API}/admin/terminals`, {
+          ...formData,
+          provider: 'tsys',
+          provisioning_status: 'draft'
+        });
+        toast.success('Terminal created successfully');
+      }
       setDialogOpen(false);
       resetForm();
       fetchTerminals();
     } catch (error) {
-      toast.error(error.response?.data?.detail || 'Failed to create terminal');
+      toast.error(error.response?.data?.detail || (editingTerminal ? 'Failed to update terminal' : 'Failed to create terminal'));
     }
+  };
+
+  const handleEdit = (terminal) => {
+    setEditingTerminal(terminal);
+    setFormData({
+      merchant_id: terminal.merchant_id || '',
+      terminal_number: terminal.terminal_number || '',
+      v_number: terminal.v_number || '',
+      merchant_number: terminal.merchant_number || '',
+      bin: terminal.bin || '',
+      chain: terminal.chain || '',
+      store_number: terminal.store_number || ''
+    });
+    setDialogOpen(true);
   };
 
   const handleProvision = async (terminalId) => {
@@ -128,6 +149,7 @@ export default function TerminalsPage() {
   };
 
   const resetForm = () => {
+    setEditingTerminal(null);
     setFormData({
       merchant_id: '',
       terminal_number: '',
@@ -169,7 +191,7 @@ export default function TerminalsPage() {
             Internal terminal registry - status changes are tracked here; no processor API is contacted
           </p>
         </div>
-        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+        <Dialog open={dialogOpen} onOpenChange={(open) => { setDialogOpen(open); if (!open) resetForm(); }}>
           <DialogTrigger asChild>
             <Button data-testid="add-terminal-btn">
               <Plus size={18} className="mr-2" />
@@ -178,13 +200,13 @@ export default function TerminalsPage() {
           </DialogTrigger>
           <DialogContent>
             <DialogHeader>
-              <DialogTitle>Add New Terminal</DialogTitle>
-              <DialogDescription>Create a new terminal profile</DialogDescription>
+              <DialogTitle>{editingTerminal ? 'Edit Terminal' : 'Add New Terminal'}</DialogTitle>
+              <DialogDescription>{editingTerminal ? 'Update terminal profile details' : 'Create a new terminal profile'}</DialogDescription>
             </DialogHeader>
             <form onSubmit={handleSubmit} className="space-y-4">
               <div>
                 <Label>Merchant</Label>
-                <Select value={formData.merchant_id} onValueChange={(v) => setFormData({...formData, merchant_id: v})}>
+                <Select value={formData.merchant_id} disabled={!!editingTerminal} onValueChange={(v) => setFormData({...formData, merchant_id: v})}>
                   <SelectTrigger data-testid="terminal-merchant-select">
                     <SelectValue placeholder="Select merchant" />
                   </SelectTrigger>
@@ -238,7 +260,7 @@ export default function TerminalsPage() {
               </div>
               <DialogFooter>
                 <Button type="button" variant="outline" onClick={() => setDialogOpen(false)}>Cancel</Button>
-                <Button type="submit" data-testid="terminal-submit-btn">Create Terminal</Button>
+                <Button type="submit" data-testid="terminal-submit-btn">{editingTerminal ? 'Update' : 'Create'} Terminal</Button>
               </DialogFooter>
             </form>
           </DialogContent>
@@ -313,29 +335,31 @@ export default function TerminalsPage() {
                       <td className="capitalize">{terminal.provider}</td>
                       <td>{getStatusBadge(terminal.provisioning_status)}</td>
                       <td>
-                        {terminal.provisioning_status !== 'live' && (
-                          <DropdownMenu>
-                            <DropdownMenuTrigger asChild>
-                              <Button variant="ghost" size="icon" data-testid={`terminal-actions-${terminal.id}`}>
-                                <MoreVertical size={16} />
-                              </Button>
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end">
-                              {terminal.provisioning_status === 'draft' && (
-                                <DropdownMenuItem onClick={() => handleProvision(terminal.id)}>
-                                  <Zap size={14} className="mr-2" />
-                                  Record Provisioning
-                                </DropdownMenuItem>
-                              )}
-                              {terminal.provisioning_status === 'provisioned' && (
-                                <DropdownMenuItem onClick={() => handleMarkLive(terminal.id)}>
-                                  <CheckCircle size={14} className="mr-2" />
-                                  Confirm Live
-                                </DropdownMenuItem>
-                              )}
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        )}
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon" data-testid={`terminal-actions-${terminal.id}`}>
+                              <MoreVertical size={16} />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent align="end">
+                            <DropdownMenuItem onClick={() => handleEdit(terminal)}>
+                              <Edit size={14} className="mr-2" />
+                              Edit
+                            </DropdownMenuItem>
+                            {terminal.provisioning_status === 'draft' && (
+                              <DropdownMenuItem onClick={() => handleProvision(terminal.id)}>
+                                <Zap size={14} className="mr-2" />
+                                Record Provisioning
+                              </DropdownMenuItem>
+                            )}
+                            {terminal.provisioning_status === 'provisioned' && (
+                              <DropdownMenuItem onClick={() => handleMarkLive(terminal.id)}>
+                                <CheckCircle size={14} className="mr-2" />
+                                Confirm Live
+                              </DropdownMenuItem>
+                            )}
+                          </DropdownMenuContent>
+                        </DropdownMenu>
                       </td>
                     </tr>
                   ))}

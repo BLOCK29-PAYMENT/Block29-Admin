@@ -56,6 +56,7 @@ export default function PaymentHubPage() {
   const [statusLoading, setStatusLoading] = useState(true);
 
   const [merchants, setMerchants] = useState([]);
+  const [adminTerminals, setAdminTerminals] = useState([]);
   const [links, setLinks] = useState({ merchant_links: [], terminal_links: [] });
 
   const [hubViewMerchant, setHubViewMerchant] = useState('');
@@ -71,8 +72,9 @@ export default function PaymentHubPage() {
 
   const [events, setEvents] = useState(null);
 
-  const [linkDialog, setLinkDialog] = useState(null); // {record}
+  const [linkDialog, setLinkDialog] = useState(null); // {type: 'merchant'|'terminal', record}
   const [linkValue, setLinkValue] = useState('');
+  const [linkSerial, setLinkSerial] = useState('');
 
   const fetchStatus = useCallback(async (manual = false) => {
     setStatusLoading(true);
@@ -93,11 +95,13 @@ export default function PaymentHubPage() {
 
   const fetchLinksAndMerchants = async () => {
     try {
-      const [m, l] = await Promise.all([
+      const [m, t, l] = await Promise.all([
         axios.get(`${API}/merchants?page_size=500`),
+        axios.get(`${API}/admin/terminals?page_size=200`),
         axios.get(`${API}/hub/links`),
       ]);
       setMerchants(m.data.items);
+      setAdminTerminals(t.data.items);
       setLinks(l.data);
     } catch (error) {
       console.error('Failed to fetch link data');
@@ -185,16 +189,25 @@ export default function PaymentHubPage() {
   const saveLink = async () => {
     if (!linkDialog || !linkValue.trim()) return;
     try {
-      const response = await axios.put(`${API}/hub/links/merchants/${linkDialog.record.id}`, {
-        hub_merchant_id: linkValue.trim(),
-      });
-      if (response.data.verified_against_hub) {
-        toast.success('Mapping saved and verified against the live Hub');
+      if (linkDialog.type === 'merchant') {
+        const response = await axios.put(`${API}/hub/links/merchants/${linkDialog.record.id}`, {
+          hub_merchant_id: linkValue.trim(),
+        });
+        if (response.data.verified_against_hub) {
+          toast.success('Mapping saved and verified against the live Hub');
+        } else {
+          toast.warning(`Mapping saved but NOT verified: ${response.data.verification_detail || 'Hub unreachable'}`);
+        }
       } else {
-        toast.warning(`Mapping saved but NOT verified: ${response.data.verification_detail || 'Hub unreachable'}`);
+        await axios.put(`${API}/hub/links/terminals/${linkDialog.record.id}`, {
+          hub_terminal_id: linkValue.trim(),
+          terminal_serial: linkSerial.trim() || null,
+        });
+        toast.success('Terminal mapping saved');
       }
       setLinkDialog(null);
       setLinkValue('');
+      setLinkSerial('');
       fetchLinksAndMerchants();
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Failed to save mapping');
@@ -202,6 +215,7 @@ export default function PaymentHubPage() {
   };
 
   const merchantLink = (id) => links.merchant_links.find((l) => l.merchant_id === id);
+  const terminalLink = (id) => links.terminal_links.find((l) => l.terminal_id === id);
   const notConfigured = status && !status.configured;
 
   return (
@@ -494,7 +508,7 @@ export default function PaymentHubPage() {
                           <td className="text-sm text-slate-500">{link?.environment || '-'}</td>
                           <td>
                             {canOperate && (
-                              <Button variant="outline" size="sm" onClick={() => { setLinkDialog({ record: m }); setLinkValue(link?.hub_merchant_id || ''); }}>
+                              <Button variant="outline" size="sm" onClick={() => { setLinkDialog({ type: 'merchant', record: m }); setLinkValue(link?.hub_merchant_id || ''); }}>
                                 {link ? 'Edit Link' : 'Link to Hub'}
                               </Button>
                             )}
@@ -502,6 +516,44 @@ export default function PaymentHubPage() {
                         </tr>
                       );
                     })}
+                  </tbody>
+                </table>
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">Terminal Mappings</CardTitle>
+              <CardDescription>Admin terminal registry rows mapped to Hub terminal IDs / device serials.</CardDescription>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="overflow-x-auto">
+                <table className="data-table">
+                  <thead><tr><th>Terminal #</th><th>Merchant</th><th>Hub Terminal ID</th><th>Serial</th><th></th></tr></thead>
+                  <tbody>
+                    {adminTerminals.map((t) => {
+                      const link = terminalLink(t.id);
+                      const merchant = merchants.find((m) => m.id === t.merchant_id);
+                      return (
+                        <tr key={t.id}>
+                          <td className="font-mono">{t.terminal_number || '-'}</td>
+                          <td>{merchant?.business_name || 'Unknown'}</td>
+                          <td className="font-mono text-sm">{link ? link.hub_terminal_id : <span className="text-slate-400">not linked</span>}</td>
+                          <td className="font-mono text-sm">{link?.terminal_serial || '-'}</td>
+                          <td>
+                            {canOperate && (
+                              <Button variant="outline" size="sm" onClick={() => { setLinkDialog({ type: 'terminal', record: t }); setLinkValue(link?.hub_terminal_id || ''); setLinkSerial(link?.terminal_serial || ''); }}>
+                                {link ? 'Edit Link' : 'Link to Hub'}
+                              </Button>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {!adminTerminals.length && (
+                      <tr><td colSpan={5} className="text-center text-slate-400 py-6">No terminals in the admin registry yet</td></tr>
+                    )}
                   </tbody>
                 </table>
               </div>
@@ -546,17 +598,24 @@ export default function PaymentHubPage() {
       <Dialog open={!!linkDialog} onOpenChange={(open) => !open && setLinkDialog(null)}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Link Merchant to Payment Hub</DialogTitle>
+            <DialogTitle>{linkDialog?.type === 'merchant' ? 'Link Merchant to Payment Hub' : 'Link Terminal to Payment Hub'}</DialogTitle>
             <DialogDescription>
-              Enter the Hub identifier (Hub user UUID, hub_mid, or numeric Hub id). It is verified against the
-              live Hub before saving. Environment: {status?.environment || 'unknown'}.
+              {linkDialog?.type === 'merchant'
+                ? 'Enter the Hub identifier (Hub user UUID, hub_mid, or numeric Hub id). It is verified against the live Hub before saving.'
+                : 'Enter the Hub terminal id (and optionally the device serial).'} Environment: {status?.environment || 'unknown'}.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-4">
             <div>
-              <Label>Hub Merchant Identifier</Label>
+              <Label>{linkDialog?.type === 'merchant' ? 'Hub Merchant Identifier' : 'Hub Terminal ID'}</Label>
               <Input value={linkValue} onChange={(e) => setLinkValue(e.target.value)} className="font-mono" data-testid="hub-link-input" />
             </div>
+            {linkDialog?.type === 'terminal' && (
+              <div>
+                <Label>Terminal Serial (optional)</Label>
+                <Input value={linkSerial} onChange={(e) => setLinkSerial(e.target.value)} className="font-mono" />
+              </div>
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setLinkDialog(null)}>Cancel</Button>
