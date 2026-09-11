@@ -20,12 +20,12 @@ const ACTION_COLORS = {
   CREATE: 'bg-emerald-100 text-emerald-800',
   UPDATE: 'bg-blue-100 text-blue-800',
   DELETE: 'bg-red-100 text-red-800',
-  VIRTUAL_TERMINAL: 'bg-purple-100 text-purple-800',
-  REFUND: 'bg-amber-100 text-amber-800',
   EXPORT: 'bg-slate-100 text-slate-800',
   LOGIN: 'bg-cyan-100 text-cyan-800',
   UPLOAD: 'bg-indigo-100 text-indigo-800',
-  PROVISION: 'bg-orange-100 text-orange-800'
+  PARSE: 'bg-purple-100 text-purple-800',
+  PROVISION: 'bg-orange-100 text-orange-800',
+  MARK_LIVE: 'bg-amber-100 text-amber-800'
 };
 
 const RESOURCE_ICONS = {
@@ -89,7 +89,7 @@ export default function SystemLogsPage() {
       setResourceTypes(response.data.resource_types);
     } catch (error) {
       // Use defaults
-      setActionTypes(['CREATE', 'UPDATE', 'DELETE', 'VIRTUAL_TERMINAL', 'REFUND', 'EXPORT', 'LOGIN']);
+      setActionTypes(['CREATE', 'UPDATE', 'DELETE', 'LOGIN', 'UPLOAD', 'PARSE', 'PROVISION', 'MARK_LIVE', 'EXPORT']);
       setResourceTypes(['merchant', 'terminal', 'transaction', 'varsheet', 'user', 'report']);
     }
   };

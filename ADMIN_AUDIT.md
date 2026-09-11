@@ -2,6 +2,17 @@
 
 Audited: 2026-09-11 · Scope: entire repo (`backend/server.py`, all 13 frontend pages, layout, auth, dependencies)
 
+> **Implementation status (2026-09-11):** Phases 0–2 are DONE on this branch, plus the recommended
+> Option B removals from Phase 3 (Virtual Terminal, Block29 Gateway stub, Affiliates, Settlement tab,
+> pairing tokens, Settings page, RISK role). The admin is rebranded Block29 and now covers the
+> AsterPOS / Chain29 / Agent9 ecosystem. Remaining: the "Planned builds" list at the bottom of
+> `requirements.md` (real gateway provisioning, real settlement, agent/commission engine, POS pairing,
+> password reset) — each needs product decisions and/or processor credentials before it can be built.
+> Not yet done: bulk deletion of the 34 unused `frontend/src/components/ui/*.jsx` stub files,
+> `frontend/src/App.css`, and `frontend/src/hooks/use-toast.js` was blocked by session file-deletion
+> permissions — they are inert (not imported, not bundled) and can be removed with
+> `git rm` in one commit whenever convenient.
+
 ## Executive summary
 
 The admin is a mix of three kinds of features:

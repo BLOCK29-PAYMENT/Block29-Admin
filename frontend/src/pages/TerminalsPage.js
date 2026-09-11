@@ -27,7 +27,7 @@ import {
   DropdownMenuTrigger,
 } from '../components/ui/dropdown-menu';
 import { toast } from 'sonner';
-import { Plus, Search, MoreVertical, Monitor, Zap, Link, CheckCircle, RefreshCw, Copy } from 'lucide-react';
+import { Plus, Search, MoreVertical, Monitor, Zap, CheckCircle, RefreshCw } from 'lucide-react';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -38,7 +38,6 @@ export default function TerminalsPage() {
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [pairingToken, setPairingToken] = useState(null);
   const [formData, setFormData] = useState({
     merchant_id: '',
     terminal_number: '',
@@ -82,7 +81,7 @@ export default function TerminalsPage() {
     try {
       await axios.post(`${API}/admin/terminals`, {
         ...formData,
-        provider: 'luqra',
+        provider: 'tsys',
         provisioning_status: 'draft'
       });
       toast.success('Terminal created successfully');
@@ -104,16 +103,6 @@ export default function TerminalsPage() {
     }
   };
 
-  const handleGeneratePairing = async (terminalId) => {
-    try {
-      const response = await axios.post(`${API}/admin/terminals/${terminalId}/pair`);
-      setPairingToken(response.data.pairing_token);
-      toast.success('Pairing token generated');
-    } catch (error) {
-      toast.error('Failed to generate pairing token');
-    }
-  };
-
   const handleMarkLive = async (terminalId) => {
     try {
       await axios.post(`${API}/admin/terminals/${terminalId}/mark-live`);
@@ -122,11 +111,6 @@ export default function TerminalsPage() {
     } catch (error) {
       toast.error(error.response?.data?.detail || 'Failed to mark live');
     }
-  };
-
-  const copyToClipboard = (text) => {
-    navigator.clipboard.writeText(text);
-    toast.success('Copied to clipboard');
   };
 
   const resetForm = () => {
@@ -244,30 +228,6 @@ export default function TerminalsPage() {
         </Dialog>
       </div>
 
-      {/* Pairing Token Display */}
-      {pairingToken && (
-        <Card className="bg-emerald-50 border-emerald-200">
-          <CardContent className="pt-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <p className="text-sm font-medium text-emerald-800">Pairing Token Generated</p>
-                <p className="text-2xl font-mono font-bold text-emerald-900 mt-1">{pairingToken}</p>
-                <p className="text-xs text-emerald-600 mt-1">Expires in 24 hours</p>
-              </div>
-              <div className="flex gap-2">
-                <Button variant="outline" size="sm" onClick={() => copyToClipboard(pairingToken)}>
-                  <Copy size={14} className="mr-1" />
-                  Copy
-                </Button>
-                <Button variant="ghost" size="sm" onClick={() => setPairingToken(null)}>
-                  Dismiss
-                </Button>
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-      )}
-
       {/* Filters */}
       <Card>
         <CardContent className="pt-6">
@@ -289,7 +249,6 @@ export default function TerminalsPage() {
               <SelectContent>
                 <SelectItem value="all">All Status</SelectItem>
                 <SelectItem value="draft">Draft</SelectItem>
-                <SelectItem value="ready">Ready</SelectItem>
                 <SelectItem value="provisioned">Provisioned</SelectItem>
                 <SelectItem value="live">Live</SelectItem>
               </SelectContent>
@@ -337,39 +296,29 @@ export default function TerminalsPage() {
                       <td className="capitalize">{terminal.provider}</td>
                       <td>{getStatusBadge(terminal.provisioning_status)}</td>
                       <td>
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <Button variant="ghost" size="icon" data-testid={`terminal-actions-${terminal.id}`}>
-                              <MoreVertical size={16} />
-                            </Button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent align="end">
-                            {terminal.provisioning_status === 'draft' && (
-                              <DropdownMenuItem onClick={() => handleProvision(terminal.id)}>
-                                <Zap size={14} className="mr-2" />
-                                Provision
-                              </DropdownMenuItem>
-                            )}
-                            {terminal.provisioning_status === 'provisioned' && (
-                              <>
-                                <DropdownMenuItem onClick={() => handleGeneratePairing(terminal.id)}>
-                                  <Link size={14} className="mr-2" />
-                                  Generate Pairing Token
+                        {terminal.provisioning_status !== 'live' && (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <Button variant="ghost" size="icon" data-testid={`terminal-actions-${terminal.id}`}>
+                                <MoreVertical size={16} />
+                              </Button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent align="end">
+                              {terminal.provisioning_status === 'draft' && (
+                                <DropdownMenuItem onClick={() => handleProvision(terminal.id)}>
+                                  <Zap size={14} className="mr-2" />
+                                  Mark Provisioned
                                 </DropdownMenuItem>
+                              )}
+                              {terminal.provisioning_status === 'provisioned' && (
                                 <DropdownMenuItem onClick={() => handleMarkLive(terminal.id)}>
                                   <CheckCircle size={14} className="mr-2" />
                                   Mark Live
                                 </DropdownMenuItem>
-                              </>
-                            )}
-                            {terminal.provisioning_status === 'live' && (
-                              <DropdownMenuItem onClick={() => handleGeneratePairing(terminal.id)}>
-                                <Link size={14} className="mr-2" />
-                                Regenerate Pairing Token
-                              </DropdownMenuItem>
-                            )}
-                          </DropdownMenuContent>
-                        </DropdownMenu>
+                              )}
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        )}
                       </td>
                     </tr>
                   ))}

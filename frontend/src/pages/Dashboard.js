@@ -41,12 +41,7 @@ export default function Dashboard() {
     { name: 'Suspended', value: (stats?.merchants?.total || 0) - (stats?.merchants?.active || 0) - (stats?.merchants?.pending || 0) },
   ].filter(d => d.value > 0);
 
-  const chartData = [
-    { name: 'Week 1', transactions: 45 },
-    { name: 'Week 2', transactions: 52 },
-    { name: 'Week 3', transactions: 38 },
-    { name: 'Week 4', transactions: 65 },
-  ];
+  const chartData = stats?.transactions?.weekly || [];
 
   return (
     <div className="space-y-6">
@@ -106,7 +101,7 @@ export default function Dashboard() {
               <div>
                 <p className="overline mb-1">Transactions</p>
                 <p className="text-3xl font-bold text-slate-900 tabular-nums">{stats?.transactions?.total || 0}</p>
-                <p className="text-sm text-slate-500 mt-1">This month</p>
+                <p className="text-sm text-slate-500 mt-1">All time</p>
               </div>
               <div className="h-12 w-12 rounded-lg bg-amber-100 flex items-center justify-center">
                 <Receipt className="h-6 w-6 text-amber-600" />
@@ -139,10 +134,15 @@ export default function Dashboard() {
         {/* Transaction Chart */}
         <Card className="lg:col-span-2">
           <CardHeader>
-            <CardTitle className="text-lg">Transactions Overview</CardTitle>
+            <CardTitle className="text-lg">Transactions - Last 4 Weeks</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="h-[300px]">
+              {chartData.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-slate-400">
+                  No transactions in the last 4 weeks
+                </div>
+              ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={chartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
@@ -158,6 +158,7 @@ export default function Dashboard() {
                   <Bar dataKey="transactions" fill="#0066CC" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
+              )}
             </div>
           </CardContent>
         </Card>

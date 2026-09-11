@@ -14,6 +14,7 @@ import bcrypt
 import re
 import json
 import aiofiles
+import contextvars
 from contextlib import asynccontextmanager
 
 # SQLAlchemy imports
@@ -42,8 +43,10 @@ DATABASE_URL = f"mysql+aiomysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MY
 engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True, pool_recycle=3600)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-# JWT Configuration
-JWT_SECRET = os.environ.get('JWT_SECRET', 'salonbookin-admin-secret-key-2024')
+# JWT Configuration - a signing secret must be provided; refuse to start with a guessable default
+JWT_SECRET = os.environ.get('JWT_SECRET')
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET environment variable is not set. Set a strong random secret before starting the server.")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
 
@@ -54,6 +57,9 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Client IP of the request currently being handled (set by middleware, read by audit logging)
+_client_ip = contextvars.ContextVar("client_ip", default="unknown")
 
 # ==================== DATABASE HELPER ====================
 
@@ -184,49 +190,46 @@ class TerminalProfileUpdate(BaseModel):
     provisioning_status: Optional[str] = None
 
 class VarSheetParsedData(BaseModel):
+    """Editable review fields for a parsed VAR sheet.
+
+    Must cover every field the VAR Sheet review form exposes - any field
+    missing here is silently dropped on save.
+    """
     merchant_name: Optional[str] = None
-    v_number: Optional[str] = None
     merchant_number: Optional[str] = None
+    v_number_primary: Optional[str] = None
+    v_number_secondary: Optional[str] = None
+    terminal_status: Optional[str] = None
     terminal_number: Optional[str] = None
     bin: Optional[str] = None
+    agent: Optional[str] = None
     chain: Optional[str] = None
     store_number: Optional[str] = None
+    location_number: Optional[str] = None
+    street_address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    postal_code: Optional[str] = None
+    phone: Optional[str] = None
+    country: Optional[str] = None
+    currency_code: Optional[str] = None
+    time_zone: Optional[str] = None
+    time_zone_differential: Optional[str] = None
+    visa_mcc: Optional[str] = None
+    industry_type: Optional[str] = None
+    host_capture_participant: Optional[str] = None
+    edc_primary: Optional[str] = None
+    edc_secondary: Optional[str] = None
     card_types: Optional[List[str]] = None
     networks: Optional[List[str]] = None
     amex_se: Optional[str] = None
     disc_se: Optional[str] = None
     aba: Optional[str] = None
+    reimbursement_att: Optional[str] = None
     raw_comments: Optional[str] = None
 
-class Block29ProvisionRequest(BaseModel):
-    merchant_id: str
-    processor: str
-    terminal_data: Dict[str, Any]
-
-class AgentMerchantCreate(BaseModel):
-    agent_id: str
-    merchant_id: str
-    commission_rate: float
-    level: int = 1
-
-class TransactionCreate(BaseModel):
-    merchant_id: str
-    terminal_id: str
-    amount: float
-    card_type: str
-    status: str = "pending"
-
-class VirtualTerminalTransaction(BaseModel):
-    merchant_id: str
-    transaction_type: str
-    amount: float
-    card_number: str
-    card_expiry: str
-    card_cvv: str
-    cardholder_name: str
-    customer_email: Optional[str] = None
-    customer_phone: Optional[str] = None
-    description: Optional[str] = None
+class UserStatusUpdate(BaseModel):
+    is_active: bool
 
 # ==================== AUDIT LOG HELPER ====================
 
@@ -239,7 +242,7 @@ async def create_audit_log(user_id: str, user_email: str, action: str, resource_
         "resource_type": resource_type,
         "resource_id": resource_id or "",
         "details": json.dumps(details or {}),
-        "ip_address": "0.0.0.0",
+        "ip_address": _client_ip.get(),
         "timestamp": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     }
     await insert_row("audit_logs", log_entry)
@@ -279,6 +282,8 @@ def require_roles(*allowed_roles):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return user
     return role_checker
+
+VALID_ROLES = ["SUPER_ADMIN", "OPERATIONS", "SUPPORT", "READ_ONLY"]
 
 # ==================== VAR PARSER (TSYS Format) ====================
 
@@ -430,43 +435,55 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down...")
 
-app = FastAPI(title="SalonBookin Admin API", lifespan=lifespan)
+app = FastAPI(title="Block29 Admin API", lifespan=lifespan)
 api_router = APIRouter(prefix="/api")
 
+@app.middleware("http")
+async def capture_client_ip(request, call_next):
+    forwarded = request.headers.get("x-forwarded-for", "")
+    ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "unknown")
+    token = _client_ip.set(ip or "unknown")
+    try:
+        return await call_next(request)
+    finally:
+        _client_ip.reset(token)
+
 async def create_tables():
-    """Create admin-specific tables if they don't exist (most tables already exist in the database)"""
-    # The database already has most tables with existing schema
-    # We only need to ensure admin-specific tables exist
-    
-    # Check if admin user exists, if not create one
-    admin = await fetch_one("SELECT id FROM users WHERE email = :email", {"email": "admin@salonbookin.com"})
+    """Seed the initial SUPER_ADMIN account, only when explicitly configured via env vars."""
+    admin_email = os.environ.get('ADMIN_EMAIL')
+    admin_password = os.environ.get('ADMIN_PASSWORD')
+    if not admin_email or not admin_password:
+        logger.info("ADMIN_EMAIL/ADMIN_PASSWORD not set - skipping admin seed")
+        return
+
+    admin = await fetch_one("SELECT id FROM users WHERE email = :email", {"email": admin_email})
     if not admin:
         await insert_row("users", {
             "id": str(uuid.uuid4()),
-            "email": "admin@salonbookin.com",
-            "password_hash": hash_password("admin123"),
-            "business_name": "SalonBookin Admin",
-            "phone_number": "",
+            "email": admin_email,
+            "password": hash_password(admin_password),
+            "name": "Block29 Admin",
             "role": "SUPER_ADMIN",
-            "is_active": 1,
-            "failed_login_attempts": 0,
             "created_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         })
-        logger.info("Default admin user created: admin@salonbookin.com / admin123")
+        logger.info(f"Seeded SUPER_ADMIN account: {admin_email}")
     else:
         logger.info("Admin user already exists")
 
 # ==================== AUTH ENDPOINTS ====================
 
 @api_router.post("/auth/register", response_model=UserResponse)
-async def register(user: UserCreate):
+async def register(user: UserCreate, current_user: dict = Depends(require_roles("SUPER_ADMIN"))):
     existing = await fetch_one("SELECT id FROM users WHERE email = :email", {"email": user.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
+    if user.role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+
     user_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    
+
     await insert_row("users", {
         "id": user_id,
         "email": user.email,
@@ -475,16 +492,21 @@ async def register(user: UserCreate):
         "role": user.role,
         "created_at": created_at
     })
-    
+
+    await create_audit_log(current_user["user_id"], current_user["email"], "CREATE", "user", user_id, {"email": user.email, "role": user.role})
     return UserResponse(id=user_id, email=user.email, name=user.name, role=user.role, created_at=created_at)
 
 @api_router.post("/auth/login")
 async def login(credentials: UserLogin):
     user = await fetch_one("SELECT * FROM users WHERE email = :email", {"email": credentials.email})
-    if not user or not verify_password(credentials.password, user["password"]):
+    if not user or not user.get("password") or not verify_password(credentials.password, user["password"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
+
+    if user.get("is_active") in (0, False):
+        raise HTTPException(status_code=403, detail="Account is deactivated")
+
     token = create_token(user["id"], user["email"], user["role"])
+    await create_audit_log(user["id"], user["email"], "LOGIN", "user", user["id"])
     return {
         "token": token,
         "user": {
@@ -507,19 +529,44 @@ async def get_me(user: dict = Depends(get_current_user)):
 
 @api_router.get("/users")
 async def list_users(user: dict = Depends(require_roles("SUPER_ADMIN"))):
-    users = await fetch_all("SELECT id, email, name, role, created_at FROM users")
+    users = await fetch_all("SELECT * FROM users")
+    safe = []
     for u in users:
-        u["created_at"] = str(u["created_at"])
-    return users
+        safe.append({
+            "id": u.get("id"),
+            "email": u.get("email"),
+            "name": u.get("name"),
+            "role": u.get("role"),
+            "is_active": 0 if u.get("is_active") in (0, False) else 1,
+            "created_at": str(u.get("created_at")) if u.get("created_at") else None
+        })
+    return safe
 
 @api_router.put("/users/{user_id}/role")
 async def update_user_role(user_id: str, role: str, user: dict = Depends(require_roles("SUPER_ADMIN"))):
-    valid_roles = ["SUPER_ADMIN", "OPERATIONS", "SUPPORT", "RISK", "READ_ONLY"]
-    if role not in valid_roles:
-        raise HTTPException(status_code=400, detail=f"Invalid role")
-    
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+
     await update_row("users", {"role": role}, "id = :user_id", {"user_id": user_id})
+    await create_audit_log(user["user_id"], user["email"], "UPDATE", "user", user_id, {"role": role})
     return {"message": "Role updated successfully"}
+
+@api_router.put("/users/{user_id}/status")
+async def update_user_status(user_id: str, update: UserStatusUpdate, user: dict = Depends(require_roles("SUPER_ADMIN"))):
+    if user_id == user["user_id"]:
+        raise HTTPException(status_code=400, detail="You cannot deactivate your own account")
+
+    target = await fetch_one("SELECT id FROM users WHERE id = :id", {"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    try:
+        await update_row("users", {"is_active": 1 if update.is_active else 0}, "id = :user_id", {"user_id": user_id})
+    except Exception:
+        raise HTTPException(status_code=400, detail="The users table has no is_active column. Run: ALTER TABLE users ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1")
+
+    await create_audit_log(user["user_id"], user["email"], "UPDATE", "user", user_id, {"is_active": update.is_active})
+    return {"message": "User activated" if update.is_active else "User deactivated"}
 
 # ==================== MERCHANT ENDPOINTS ====================
 
@@ -540,7 +587,8 @@ async def create_merchant(merchant: MerchantCreate, user: dict = Depends(require
         "created_at": created_at,
         "created_by": user["user_id"]
     })
-    
+
+    await create_audit_log(user["user_id"], user["email"], "CREATE", "merchant", merchant_id, {"business_name": merchant.business_name})
     return {"id": merchant_id, **merchant.model_dump(), "created_at": created_at}
 
 @api_router.get("/merchants")
@@ -580,12 +628,24 @@ async def update_merchant(merchant_id: str, update: MerchantUpdate, user: dict =
     
     update_data["updated_at"] = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     await update_row("merchants", update_data, "id = :merchant_id", {"merchant_id": merchant_id})
-    
+
+    await create_audit_log(user["user_id"], user["email"], "UPDATE", "merchant", merchant_id, update_data)
     return await get_merchant(merchant_id, user)
 
 @api_router.delete("/merchants/{merchant_id}")
 async def delete_merchant(merchant_id: str, user: dict = Depends(require_roles("SUPER_ADMIN"))):
+    terminals = await fetch_one("SELECT COUNT(*) as count FROM terminal_profiles WHERE merchant_id = :id", {"id": merchant_id})
+    transactions = await fetch_one("SELECT COUNT(*) as count FROM transactions WHERE merchant_id = :id", {"id": merchant_id})
+    t_count = terminals["count"] if terminals else 0
+    tx_count = transactions["count"] if transactions else 0
+    if t_count or tx_count:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Merchant has {t_count} terminal(s) and {tx_count} transaction(s). Suspend the merchant instead of deleting, or remove its terminals first."
+        )
+
     await delete_row("merchants", "id = :id", {"id": merchant_id})
+    await create_audit_log(user["user_id"], user["email"], "DELETE", "merchant", merchant_id)
     return {"message": "Merchant deleted successfully"}
 
 # ==================== VAR SHEET ENDPOINTS ====================
@@ -614,7 +674,8 @@ async def upload_varsheet(file: UploadFile = File(...), merchant_id: str = Form(
         "created_at": created_at,
         "created_by": user["user_id"]
     })
-    
+
+    await create_audit_log(user["user_id"], user["email"], "UPLOAD", "varsheet", file_id, {"filename": file.filename, "merchant_id": merchant_id})
     return {"id": file_id, "merchant_id": merchant_id, "filename": file.filename, "parse_status": "pending", "created_at": created_at}
 
 @api_router.post("/admin/varsheet/{varsheet_id}/parse")
@@ -643,7 +704,8 @@ async def parse_varsheet(varsheet_id: str, user: dict = Depends(require_roles("S
         "parse_status": parse_status,
         "parsed_at": parsed_at
     }, "id = :id", {"id": varsheet_id})
-    
+
+    await create_audit_log(user["user_id"], user["email"], "PARSE", "varsheet", varsheet_id, {"parse_status": parse_status})
     return {"id": varsheet_id, "parsed_json": parsed_data, "parse_status": parse_status}
 
 @api_router.get("/admin/varsheet/{varsheet_id}")
@@ -693,7 +755,8 @@ async def update_varsheet_parsed_data(varsheet_id: str, parsed_data: VarSheetPar
         "parsed_json": json.dumps(merged),
         "updated_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     }, "id = :id", {"id": varsheet_id})
-    
+
+    await create_audit_log(user["user_id"], user["email"], "UPDATE", "varsheet", varsheet_id)
     return {"id": varsheet_id, "parsed_json": merged}
 
 # ==================== TERMINAL ENDPOINTS ====================
@@ -715,7 +778,8 @@ async def create_terminal(terminal: TerminalProfileCreate, user: dict = Depends(
     data["networks"] = json.dumps(data.get("networks") or [])
     
     await insert_row("terminal_profiles", data)
-    
+
+    await create_audit_log(user["user_id"], user["email"], "CREATE", "terminal", terminal_id, {"merchant_id": terminal.merchant_id, "terminal_number": terminal.terminal_number})
     data["card_types"] = terminal.card_types
     data["networks"] = terminal.networks
     return data
@@ -765,7 +829,8 @@ async def update_terminal(terminal_id: str, update: TerminalProfileUpdate, user:
     
     update_data["updated_at"] = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     await update_row("terminal_profiles", update_data, "id = :terminal_id", {"terminal_id": terminal_id})
-    
+
+    await create_audit_log(user["user_id"], user["email"], "UPDATE", "terminal", terminal_id)
     return await get_terminal(terminal_id, user)
 
 @api_router.post("/admin/terminals/{terminal_id}/provision")
@@ -782,142 +847,26 @@ async def provision_terminal(terminal_id: str, user: dict = Depends(require_role
         "provisioned_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
         "provisioned_by": user["user_id"]
     }, "id = :id", {"id": terminal_id})
-    
-    return {"message": "Terminal provisioned successfully", "status": "provisioned"}
 
-@api_router.post("/admin/terminals/{terminal_id}/pair")
-async def generate_pairing_token(terminal_id: str, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
-    terminal = await fetch_one("SELECT id FROM terminal_profiles WHERE id = :id", {"id": terminal_id})
-    if not terminal:
-        raise HTTPException(status_code=404, detail="Terminal not found")
-    
-    pairing_token = str(uuid.uuid4()).upper()[:12]
-    created_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
-    
-    await insert_row("pos_terminal_links", {
-        "id": str(uuid.uuid4()),
-        "terminal_profile_id": terminal_id,
-        "pairing_token": pairing_token,
-        "token_status": "active",
-        "created_at": created_at,
-        "expires_at": expires_at
-    })
-    
-    return {"pairing_token": pairing_token, "expires_in": "24 hours"}
+    await create_audit_log(user["user_id"], user["email"], "PROVISION", "terminal", terminal_id)
+    return {"message": "Terminal provisioned successfully", "status": "provisioned"}
 
 @api_router.post("/admin/terminals/{terminal_id}/mark-live")
 async def mark_terminal_live(terminal_id: str, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
+    terminal = await fetch_one("SELECT id FROM terminal_profiles WHERE id = :id", {"id": terminal_id})
+    if not terminal:
+        raise HTTPException(status_code=404, detail="Terminal not found")
+
     await update_row("terminal_profiles", {
         "provisioning_status": "live",
         "live_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
         "live_by": user["user_id"]
     }, "id = :id", {"id": terminal_id})
-    
+
+    await create_audit_log(user["user_id"], user["email"], "MARK_LIVE", "terminal", terminal_id)
     return {"message": "Terminal marked as live", "status": "live"}
 
-# ==================== BLOCK29 GATEWAY ====================
-
-@api_router.post("/block29/provision-terminal")
-async def block29_provision(request: Block29ProvisionRequest, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
-    valid_processors = ["clover", "dejavoo", "valor"]
-    if request.processor.lower() not in valid_processors:
-        raise HTTPException(status_code=400, detail=f"Invalid processor")
-    
-    provision_id = str(uuid.uuid4())
-    await insert_row("block29_provisions", {
-        "id": provision_id,
-        "merchant_id": request.merchant_id,
-        "processor": request.processor.lower(),
-        "terminal_data": json.dumps(request.terminal_data),
-        "status": "submitted",
-        "created_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-        "created_by": user["user_id"]
-    })
-    
-    return {"provision_id": provision_id, "status": "submitted", "processor": request.processor}
-
-@api_router.get("/block29/provisions")
-async def list_block29_provisions(merchant_id: Optional[str] = None, processor: Optional[str] = None, user: dict = Depends(get_current_user)):
-    query = "SELECT * FROM block29_provisions WHERE 1=1"
-    params = {}
-    
-    if merchant_id:
-        query += " AND merchant_id = :merchant_id"
-        params["merchant_id"] = merchant_id
-    if processor:
-        query += " AND processor = :processor"
-        params["processor"] = processor.lower()
-    
-    query += " ORDER BY created_at DESC"
-    provisions = await fetch_all(query, params)
-    
-    for p in provisions:
-        p["created_at"] = str(p["created_at"]) if p["created_at"] else None
-        p["terminal_data"] = json.loads(p["terminal_data"]) if p.get("terminal_data") else {}
-    
-    return provisions
-
-# ==================== AGENT/AFFILIATE ====================
-
-@api_router.post("/agents/merchants")
-async def assign_merchant_to_agent(assignment: AgentMerchantCreate, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
-    merchant = await fetch_one("SELECT id FROM merchants WHERE id = :id", {"id": assignment.merchant_id})
-    if not merchant:
-        raise HTTPException(status_code=404, detail="Merchant not found")
-    
-    assignment_id = str(uuid.uuid4())
-    await insert_row("agent_merchants", {
-        "id": assignment_id,
-        "agent_id": assignment.agent_id,
-        "merchant_id": assignment.merchant_id,
-        "commission_rate": assignment.commission_rate,
-        "level": assignment.level,
-        "created_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-        "created_by": user["user_id"]
-    })
-    
-    return {"id": assignment_id, **assignment.model_dump()}
-
-@api_router.get("/agents/merchants")
-async def list_agent_merchant_assignments(agent_id: Optional[str] = None, user: dict = Depends(get_current_user)):
-    query = "SELECT * FROM agent_merchants WHERE 1=1"
-    params = {}
-    
-    if agent_id:
-        query += " AND agent_id = :agent_id"
-        params["agent_id"] = agent_id
-    
-    assignments = await fetch_all(query, params)
-    for a in assignments:
-        a["created_at"] = str(a["created_at"]) if a["created_at"] else None
-        a["commission_rate"] = float(a["commission_rate"]) if a.get("commission_rate") else 0
-    return assignments
-
-@api_router.get("/agents")
-async def list_agents(user: dict = Depends(get_current_user)):
-    agents = await fetch_all("SELECT id, email, name, role, created_at FROM users")
-    for a in agents:
-        a["created_at"] = str(a["created_at"]) if a["created_at"] else None
-    return agents
-
 # ==================== TRANSACTIONS ====================
-
-@api_router.post("/transactions")
-async def create_transaction(transaction: TransactionCreate, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
-    tx_id = str(uuid.uuid4())
-    await insert_row("transactions", {
-        "id": tx_id,
-        "merchant_id": transaction.merchant_id,
-        "terminal_id": transaction.terminal_id,
-        "amount": transaction.amount,
-        "card_type": transaction.card_type,
-        "status": transaction.status,
-        "created_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    })
-    
-    await create_audit_log(user["user_id"], user["email"], "CREATE", "transaction", tx_id)
-    return {"id": tx_id, **transaction.model_dump()}
 
 @api_router.get("/transactions")
 async def list_transactions(merchant_id: Optional[str] = None, status: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
@@ -945,109 +894,6 @@ async def list_transactions(merchant_id: Optional[str] = None, status: Optional[
         t["amount"] = float(t["amount"]) if t.get("amount") else 0
     
     return transactions
-
-# ==================== VIRTUAL TERMINAL ====================
-
-@api_router.post("/virtual-terminal/process")
-async def process_virtual_terminal(transaction: VirtualTerminalTransaction, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
-    merchant = await fetch_one("SELECT id FROM merchants WHERE id = :id", {"id": transaction.merchant_id})
-    if not merchant:
-        raise HTTPException(status_code=404, detail="Merchant not found")
-    
-    card_last_four = transaction.card_number[-4:] if len(transaction.card_number) >= 4 else "****"
-    card_number = transaction.card_number.replace(" ", "").replace("-", "")
-    
-    if card_number.startswith("4"):
-        card_brand = "VISA"
-    elif card_number[:2] in ["51", "52", "53", "54", "55"]:
-        card_brand = "MasterCard"
-    elif card_number[:2] in ["34", "37"]:
-        card_brand = "AMEX"
-    elif card_number.startswith("6011"):
-        card_brand = "Discover"
-    else:
-        card_brand = "Unknown"
-    
-    import random
-    is_approved = random.random() > 0.1
-    auth_code = str(uuid.uuid4())[:8].upper() if is_approved else None
-    
-    tx_id = str(uuid.uuid4())
-    created_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    
-    await insert_row("transactions", {
-        "id": tx_id,
-        "merchant_id": transaction.merchant_id,
-        "terminal_id": "VIRTUAL",
-        "transaction_type": transaction.transaction_type,
-        "amount": transaction.amount,
-        "card_type": card_brand,
-        "card_last_four": card_last_four,
-        "card_expiry": transaction.card_expiry,
-        "cardholder_name": transaction.cardholder_name,
-        "customer_email": transaction.customer_email,
-        "customer_phone": transaction.customer_phone,
-        "description": transaction.description,
-        "status": "approved" if is_approved else "declined",
-        "auth_code": auth_code,
-        "response_code": "00" if is_approved else "05",
-        "response_message": "APPROVED" if is_approved else "DECLINED - Do Not Honor",
-        "entry_mode": "KEYED",
-        "processed_by": user["user_id"],
-        "created_at": created_at
-    })
-    
-    await create_audit_log(user["user_id"], user["email"], "VIRTUAL_TERMINAL", "transaction", tx_id, {"amount": transaction.amount, "status": "approved" if is_approved else "declined"})
-    
-    return {
-        "id": tx_id,
-        "status": "approved" if is_approved else "declined",
-        "amount": transaction.amount,
-        "card_type": card_brand,
-        "card_last_four": card_last_four,
-        "auth_code": auth_code,
-        "response_code": "00" if is_approved else "05",
-        "response_message": "APPROVED" if is_approved else "DECLINED - Do Not Honor",
-        "created_at": created_at
-    }
-
-@api_router.post("/virtual-terminal/refund/{transaction_id}")
-async def process_refund(transaction_id: str, amount: Optional[float] = None, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
-    original_tx = await fetch_one("SELECT * FROM transactions WHERE id = :id", {"id": transaction_id})
-    if not original_tx:
-        raise HTTPException(status_code=404, detail="Original transaction not found")
-    
-    if original_tx["status"] != "approved":
-        raise HTTPException(status_code=400, detail="Can only refund approved transactions")
-    
-    refund_amount = amount if amount else float(original_tx["amount"])
-    if refund_amount > float(original_tx["amount"]):
-        raise HTTPException(status_code=400, detail="Refund amount cannot exceed original amount")
-    
-    refund_id = str(uuid.uuid4())
-    created_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    
-    await insert_row("transactions", {
-        "id": refund_id,
-        "merchant_id": original_tx["merchant_id"],
-        "terminal_id": "VIRTUAL",
-        "transaction_type": "refund",
-        "amount": refund_amount,
-        "card_type": original_tx.get("card_type"),
-        "card_last_four": original_tx.get("card_last_four"),
-        "original_transaction_id": transaction_id,
-        "status": "approved",
-        "auth_code": str(uuid.uuid4())[:8].upper(),
-        "response_code": "00",
-        "response_message": "REFUND APPROVED",
-        "entry_mode": "KEYED",
-        "processed_by": user["user_id"],
-        "created_at": created_at
-    })
-    
-    await create_audit_log(user["user_id"], user["email"], "REFUND", "transaction", refund_id, {"original_tx": transaction_id, "amount": refund_amount})
-    
-    return {"id": refund_id, "status": "approved", "amount": refund_amount, "response_message": "REFUND APPROVED"}
 
 # ==================== REPORTS ====================
 
@@ -1146,49 +992,6 @@ async def get_batch_report(start_date: str, end_date: str, merchant_id: Optional
         "report_generated": datetime.now(timezone.utc).isoformat()
     }
 
-@api_router.get("/reports/settlement")
-async def get_settlement_report(start_date: str, end_date: str, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
-    transactions = await fetch_all(
-        "SELECT * FROM transactions WHERE created_at >= :start_date AND created_at <= :end_date AND status = 'approved'",
-        {"start_date": start_date, "end_date": end_date}
-    )
-    merchants = await fetch_all("SELECT * FROM merchants")
-    merchant_map = {m["id"]: m for m in merchants}
-    
-    settlements = {}
-    for tx in transactions:
-        mid = tx.get("merchant_id")
-        if mid not in settlements:
-            merchant = merchant_map.get(mid, {})
-            settlements[mid] = {"merchant_id": mid, "merchant_name": merchant.get("business_name", "Unknown"), "transaction_count": 0, "gross_amount": 0, "refund_amount": 0, "net_amount": 0, "fee_amount": 0}
-        
-        amount = float(tx["amount"]) if tx.get("amount") else 0
-        if tx.get("transaction_type") == "refund":
-            settlements[mid]["refund_amount"] += amount
-        else:
-            settlements[mid]["gross_amount"] += amount
-        settlements[mid]["transaction_count"] += 1
-    
-    for s in settlements.values():
-        s["net_amount"] = round(s["gross_amount"] - s["refund_amount"], 2)
-        s["fee_amount"] = round(s["gross_amount"] * 0.029 + (s["transaction_count"] * 0.30), 2)
-        s["payout_amount"] = round(s["net_amount"] - s["fee_amount"], 2)
-        s["gross_amount"] = round(s["gross_amount"], 2)
-        s["refund_amount"] = round(s["refund_amount"], 2)
-    
-    settlement_list = sorted(settlements.values(), key=lambda x: x["net_amount"], reverse=True)
-    
-    return {
-        "summary": {
-            "total_merchants": len(settlement_list),
-            "total_gross": round(sum(s["gross_amount"] for s in settlement_list), 2),
-            "total_fees": round(sum(s["fee_amount"] for s in settlement_list), 2),
-            "total_payout": round(sum(s["payout_amount"] for s in settlement_list), 2)
-        },
-        "settlements": settlement_list,
-        "report_generated": datetime.now(timezone.utc).isoformat()
-    }
-
 @api_router.get("/reports/export")
 async def export_transactions_csv(start_date: str, end_date: str, merchant_id: Optional[str] = None, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
     query = "SELECT * FROM transactions WHERE created_at >= :start_date AND created_at <= :end_date"
@@ -1259,7 +1062,7 @@ async def get_log_action_types(user: dict = Depends(require_roles("SUPER_ADMIN")
     actions = await fetch_all("SELECT DISTINCT action FROM audit_logs")
     resource_types = await fetch_all("SELECT DISTINCT resource_type FROM audit_logs")
     return {
-        "actions": [a["action"] for a in actions] or ["CREATE", "UPDATE", "DELETE", "VIRTUAL_TERMINAL", "REFUND", "EXPORT"],
+        "actions": [a["action"] for a in actions] or ["CREATE", "UPDATE", "DELETE", "LOGIN", "UPLOAD", "PARSE", "PROVISION", "MARK_LIVE", "EXPORT"],
         "resource_types": [r["resource_type"] for r in resource_types] or ["merchant", "terminal", "transaction", "varsheet", "user", "report"]
     }
 
@@ -1296,12 +1099,38 @@ async def get_dashboard_stats(user: dict = Depends(get_current_user)):
     live_terminals = await fetch_one("SELECT COUNT(*) as count FROM terminal_profiles WHERE provisioning_status = 'live'")
     
     total_transactions = await fetch_one("SELECT COUNT(*) as count FROM transactions")
-    
+
     recent_transactions = await fetch_all("SELECT * FROM transactions ORDER BY created_at DESC LIMIT 30")
     for t in recent_transactions:
         t["created_at"] = str(t["created_at"]) if t["created_at"] else None
         t["amount"] = float(t["amount"]) if t.get("amount") else 0
-    
+
+    # Real weekly transaction aggregates for the last 4 weeks
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=28)).strftime('%Y-%m-%d %H:%M:%S')
+    daily = await fetch_all(
+        "SELECT DATE(created_at) as day, COUNT(*) as count, COALESCE(SUM(amount), 0) as volume "
+        "FROM transactions WHERE created_at >= :cutoff GROUP BY DATE(created_at)",
+        {"cutoff": cutoff}
+    )
+    weekly = []
+    for i in range(3, -1, -1):
+        week_end = now - timedelta(days=7 * i)
+        week_start = week_end - timedelta(days=7)
+        count = 0
+        volume = 0.0
+        for row in daily:
+            day = row["day"]
+            day_dt = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
+            if week_start < day_dt <= week_end:
+                count += row["count"]
+                volume += float(row["volume"] or 0)
+        weekly.append({
+            "name": f"{week_start.strftime('%b %d')} - {week_end.strftime('%b %d')}",
+            "transactions": count,
+            "volume": round(volume, 2)
+        })
+
     return {
         "merchants": {
             "total": total_merchants["count"] if total_merchants else 0,
@@ -1314,7 +1143,8 @@ async def get_dashboard_stats(user: dict = Depends(get_current_user)):
         },
         "transactions": {
             "total": total_transactions["count"] if total_transactions else 0,
-            "recent": recent_transactions
+            "recent": recent_transactions,
+            "weekly": weekly
         }
     }
 
@@ -1322,7 +1152,7 @@ async def get_dashboard_stats(user: dict = Depends(get_current_user)):
 
 @api_router.get("/")
 async def root():
-    return {"message": "SalonBookin Admin API", "version": "1.0.0", "database": "MySQL"}
+    return {"message": "Block29 Admin API", "version": "1.1.0", "database": "MySQL"}
 
 @api_router.get("/health")
 async def health():

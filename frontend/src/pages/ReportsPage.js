@@ -13,7 +13,7 @@ import {
   SelectValue,
 } from '../components/ui/select';
 import { toast } from 'sonner';
-import { BarChart3, Download, RefreshCw, Calendar, DollarSign, TrendingUp, FileSpreadsheet, Percent } from 'lucide-react';
+import { BarChart3, Download, RefreshCw, FileSpreadsheet } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line } from 'recharts';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
@@ -36,7 +36,6 @@ export default function ReportsPage() {
   // Report data
   const [transactionReport, setTransactionReport] = useState(null);
   const [batchReport, setBatchReport] = useState(null);
-  const [settlementReport, setSettlementReport] = useState(null);
 
   useEffect(() => {
     fetchMerchants();
@@ -87,23 +86,6 @@ export default function ReportsPage() {
     }
   };
 
-  const fetchSettlementReport = async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams({
-        start_date: startDate,
-        end_date: endDate + 'T23:59:59'
-      });
-      
-      const response = await axios.get(`${API}/reports/settlement?${params}`);
-      setSettlementReport(response.data);
-    } catch (error) {
-      toast.error('Failed to fetch settlement report');
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleExport = async () => {
     try {
       const params = new URLSearchParams({
@@ -148,9 +130,6 @@ export default function ReportsPage() {
         break;
       case 'batches':
         fetchBatchReport();
-        break;
-      case 'settlement':
-        fetchSettlementReport();
         break;
     }
   };
@@ -230,7 +209,6 @@ export default function ReportsPage() {
         <TabsList>
           <TabsTrigger value="transactions">Transaction Report</TabsTrigger>
           <TabsTrigger value="batches">Batch Report</TabsTrigger>
-          <TabsTrigger value="settlement">Settlement Report</TabsTrigger>
         </TabsList>
 
         {/* Transaction Report */}
@@ -483,86 +461,6 @@ export default function ReportsPage() {
           )}
         </TabsContent>
 
-        {/* Settlement Report */}
-        <TabsContent value="settlement" className="space-y-6">
-          {settlementReport ? (
-            <>
-              {/* Summary */}
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                <Card className="stats-card">
-                  <CardContent className="pt-5">
-                    <p className="overline mb-1">Merchants</p>
-                    <p className="text-2xl font-bold tabular-nums">{settlementReport.summary.total_merchants}</p>
-                  </CardContent>
-                </Card>
-                <Card className="stats-card">
-                  <CardContent className="pt-5">
-                    <p className="overline mb-1">Gross Volume</p>
-                    <p className="text-2xl font-bold tabular-nums">
-                      ${settlementReport.summary.total_gross.toLocaleString()}
-                    </p>
-                  </CardContent>
-                </Card>
-                <Card className="stats-card">
-                  <CardContent className="pt-5">
-                    <p className="overline mb-1">Total Fees</p>
-                    <p className="text-2xl font-bold tabular-nums text-amber-600">
-                      ${settlementReport.summary.total_fees.toLocaleString()}
-                    </p>
-                  </CardContent>
-                </Card>
-                <Card className="stats-card">
-                  <CardContent className="pt-5">
-                    <p className="overline mb-1">Net Payout</p>
-                    <p className="text-2xl font-bold tabular-nums text-emerald-600">
-                      ${settlementReport.summary.total_payout.toLocaleString()}
-                    </p>
-                  </CardContent>
-                </Card>
-              </div>
-
-              {/* Settlement Table */}
-              <Card>
-                <CardHeader>
-                  <CardTitle className="text-base">Merchant Settlement Details</CardTitle>
-                </CardHeader>
-                <CardContent className="p-0">
-                  <div className="overflow-x-auto">
-                    <table className="data-table">
-                      <thead>
-                        <tr>
-                          <th>Merchant</th>
-                          <th>Transactions</th>
-                          <th>Gross</th>
-                          <th>Refunds</th>
-                          <th>Fees (2.9% + $0.30)</th>
-                          <th>Net Payout</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {settlementReport.settlements.map((s) => (
-                          <tr key={s.merchant_id}>
-                            <td className="font-medium">{s.merchant_name}</td>
-                            <td className="tabular-nums">{s.transaction_count}</td>
-                            <td className="tabular-nums">${s.gross_amount.toLocaleString()}</td>
-                            <td className="tabular-nums text-red-600">${s.refund_amount.toLocaleString()}</td>
-                            <td className="tabular-nums text-amber-600">${s.fee_amount.toLocaleString()}</td>
-                            <td className="tabular-nums font-semibold text-emerald-600">${s.payout_amount.toLocaleString()}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </CardContent>
-              </Card>
-            </>
-          ) : (
-            <Card className="py-12 text-center text-slate-400">
-              <DollarSign className="w-12 h-12 mx-auto mb-3 opacity-50" />
-              <p>Select date range and click "Generate Report"</p>
-            </Card>
-          )}
-        </TabsContent>
       </Tabs>
     </div>
   );
