@@ -8,10 +8,9 @@ Audited: 2026-09-11 · Scope: entire repo (`backend/server.py`, all 13 frontend 
 > AsterPOS / Chain29 / Agent9 ecosystem. Remaining: the "Planned builds" list at the bottom of
 > `requirements.md` (real gateway provisioning, real settlement, agent/commission engine, POS pairing,
 > password reset) — each needs product decisions and/or processor credentials before it can be built.
-> Not yet done: bulk deletion of the 34 unused `frontend/src/components/ui/*.jsx` stub files,
-> `frontend/src/App.css`, and `frontend/src/hooks/use-toast.js` was blocked by session file-deletion
-> permissions — they are inert (not imported, not bundled) and can be removed with
-> `git rm` in one commit whenever convenient.
+> Update: the unused UI stubs, `App.css`, and `use-toast.js` have since been deleted, along with
+> the Emergent craco plugins, PostHog analytics, and all remaining generator artifacts.
+> See ADMIN_FINAL_AUDIT.md for the current state.
 
 ## Executive summary
 

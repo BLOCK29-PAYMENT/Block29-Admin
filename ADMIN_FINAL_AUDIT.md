@@ -38,7 +38,7 @@ Branch `claude/admin-site-full-audit-tdb6m0`. Status values: PASS or BLOCKED onl
 
 | Gate | Result |
 |---|---|
-| Backend tests | **49/49 pass** (`pytest tests/`) |
+| Backend tests | **55/55 pass** (`pytest tests/`) |
 | Frontend tests | **5/5 pass** (`yarn test`) |
 | Production build | **PASS** (`CI=true yarn build` — lint warnings are errors) |
 | Backend compile/import | **PASS** (41 routes) |
@@ -52,5 +52,12 @@ Branch `claude/admin-site-full-audit-tdb6m0`. Status values: PASS or BLOCKED onl
 1. **Hub runtime config** — set `PAYMENT_HUB_URL` + `PAYMENT_HUB_ADMIN_KEY` (Hub `ADMIN_API_KEY`) in the admin deployment; until then the Hub console honestly reports NOT CONFIGURED.
 2. **Hub-side fixes** (read-only access to that repo here) — see PAYMENT_HUB_ADMIN_API_MAP.md §follow-ups; **#1 (committed production credentials in `ecs-task-definition.json`) is urgent**.
 3. **DB migrations** — run 001–004 against the live MySQL (003 is an owner-reviewed cleanup, not automated).
-4. **Unused frontend stub deletion** — 34 shadcn stubs + `App.css` + `use-toast.js` are inert but present; bulk file deletion was blocked by session permissions (one `git rm` commit).
-5. **Held features (per spec §37)** — Virtual Terminal, settlement engine, affiliates/commissions, POS pairing, 2FA, password reset: not rebuilt, by design.
+4. **Held features (per spec §37)** — Virtual Terminal, settlement engine, affiliates/commissions, POS pairing, 2FA, password reset: not rebuilt, by design.
+5. **Credential rotation** — see the rotation checklist delivered with the final report (admin MySQL password is in this repo's public git history; Hub secrets are in the Hub repo's `ecs-task-definition.json`).
+
+Post-audit updates (same branch): unused UI stubs/`App.css`/`use-toast.js` deleted; Emergent craco
+plugins, CRA boilerplate, PostHog analytics + emergent.sh script in `public/index.html` removed;
+terminal Edit UI and Hub terminal-mapping UI added; all 10 code-review findings fixed
+(spoofable rate-limit key, token revocation on deactivation, bounded failure tracker, role-change
+guards, safe CSV with formula-injection protection, hub-link cleanup on merchant delete, concurrent
+Hub checks, calendar-day dashboard buckets, mapping truncation notices).

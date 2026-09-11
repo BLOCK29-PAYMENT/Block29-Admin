@@ -49,6 +49,6 @@ Verdicts: KEEP · KEEP + FIX (fixed in this pass) · DELETE (already deleted) ·
 | `pos_terminal_links` table (pairing tokens) | MySQL | ORPHAN — migration `002_drop_removed_feature_tables.sql` |
 | `block29_provisions`, `agent_merchants` tables | MySQL | ORPHAN — same migration |
 | Fake VT rows in `transactions` | MySQL | Identified by `terminal_id='VIRTUAL'` — migration `003` (owner-reviewed cleanup, NOT automatic) |
-| Unused shadcn stubs (34 files), `App.css`, `hooks/use-toast.js` | frontend/src | Present but inert (not imported, not bundled). Deletion blocked by session file-delete permission — flagged for one `git rm` commit |
+| Unused shadcn stubs (34 files), `App.css`, `hooks/use-toast.js` | frontend/src | DELETED (later commit on this branch, together with Emergent craco plugins, PostHog analytics, and generator artifacts) |
 | `motor`/`pymongo`/`boto3`/etc. pip deps | requirements.txt | GONE (trimmed to runtime deps) |
 | Unused npm deps | package.json | GONE (52 → 21) |
