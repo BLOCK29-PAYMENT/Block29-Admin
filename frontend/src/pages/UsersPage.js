@@ -20,6 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../components/ui/select';
+import Pagination from '../components/Pagination';
 import { toast } from 'sonner';
 import { Plus, UserCog, Shield, RefreshCw, Search, Mail } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -35,6 +36,9 @@ const ROLES = [
 
 export default function UsersPage() {
   const [users, setUsers] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const pageSize = 50;
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -47,15 +51,22 @@ export default function UsersPage() {
   const { user: currentUser, hasRole } = useAuth();
 
   useEffect(() => {
-    fetchUsers();
-  }, []);
+    const timer = setTimeout(fetchUsers, search ? 350 : 0);
+    return () => clearTimeout(timer);
+  }, [search, page]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search]);
 
   const fetchUsers = async () => {
     try {
-      const response = await axios.get(`${API}/users`);
-      setUsers(response.data);
+      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+      if (search) params.append('search', search);
+      const response = await axios.get(`${API}/users?${params}`);
+      setUsers(response.data.items);
+      setTotal(response.data.total);
     } catch (error) {
-      // If not authorized, show current user only
       if (error.response?.status === 403) {
         toast.error('Insufficient permissions to view all users');
       }
@@ -102,10 +113,7 @@ export default function UsersPage() {
     return <span className={`badge ${roleInfo?.color || 'badge-pending'}`}>{roleInfo?.label || role}</span>;
   };
 
-  const filteredUsers = users.filter(u => 
-    u.name?.toLowerCase().includes(search.toLowerCase()) ||
-    u.email?.toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredUsers = users;
 
   const isSuperAdmin = hasRole('SUPER_ADMIN');
 
@@ -315,6 +323,7 @@ export default function UsersPage() {
                   ))}
                 </tbody>
               </table>
+              <Pagination page={page} pageSize={pageSize} total={total} onPageChange={setPage} />
             </div>
           )}
         </CardContent>

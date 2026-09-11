@@ -43,8 +43,8 @@ export default function ReportsPage() {
 
   const fetchMerchants = async () => {
     try {
-      const response = await axios.get(`${API}/merchants`);
-      setMerchants(response.data);
+      const response = await axios.get(`${API}/merchants?page_size=500`);
+      setMerchants(response.data.items);
     } catch (error) {
       console.error('Failed to fetch merchants');
     }
@@ -150,7 +150,7 @@ export default function ReportsPage() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Reports</h1>
-          <p className="text-slate-500 mt-1">Transaction, batch, and settlement reports</p>
+          <p className="text-slate-500 mt-1">Transaction and daily batch reports from admin transaction data</p>
         </div>
         <Button onClick={handleExport} variant="outline" data-testid="export-csv-btn">
           <Download size={18} className="mr-2" />
@@ -312,7 +312,9 @@ export default function ReportsPage() {
               {/* Transaction Table */}
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">Transaction Details ({transactionReport.transactions.length})</CardTitle>
+                  <CardTitle className="text-base">
+                    Transaction Details ({transactionReport.transactions.length}{transactionReport.transactions.length > 100 ? ' - showing first 100; use Export CSV for the full set' : ''})
+                  </CardTitle>
                 </CardHeader>
                 <CardContent className="p-0">
                   <div className="overflow-x-auto max-h-[400px]">
@@ -386,9 +388,9 @@ export default function ReportsPage() {
                 </Card>
                 <Card className="stats-card">
                   <CardContent className="pt-5">
-                    <p className="overline mb-1">Net Settlement</p>
+                    <p className="overline mb-1">Net Total</p>
                     <p className="text-2xl font-bold tabular-nums text-blue-600">
-                      ${batchReport.summary.net_settlement.toLocaleString()}
+                      ${batchReport.summary.net_total.toLocaleString()}
                     </p>
                   </CardContent>
                 </Card>
@@ -397,7 +399,7 @@ export default function ReportsPage() {
               {/* Daily Chart */}
               <Card>
                 <CardHeader>
-                  <CardTitle className="text-base">Daily Settlement Trend</CardTitle>
+                  <CardTitle className="text-base">Daily Net Trend (last 14 days shown)</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <div className="h-[300px]">

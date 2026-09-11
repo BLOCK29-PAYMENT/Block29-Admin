@@ -26,13 +26,17 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '../components/ui/dropdown-menu';
+import Pagination from '../components/Pagination';
 import { toast } from 'sonner';
-import { Plus, Search, MoreVertical, Monitor, Zap, CheckCircle, RefreshCw } from 'lucide-react';
+import { Plus, Search, MoreVertical, Monitor, Zap, CheckCircle, RefreshCw, Info } from 'lucide-react';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 export default function TerminalsPage() {
   const [terminals, setTerminals] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const pageSize = 50;
   const [merchants, setMerchants] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -49,17 +53,27 @@ export default function TerminalsPage() {
   });
 
   useEffect(() => {
-    fetchTerminals();
+    const timer = setTimeout(fetchTerminals, search ? 350 : 0);
+    return () => clearTimeout(timer);
+  }, [statusFilter, search, page]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [statusFilter, search]);
+
+  useEffect(() => {
     fetchMerchants();
-  }, [statusFilter]);
+  }, []);
 
   const fetchTerminals = async () => {
     try {
-      const params = new URLSearchParams();
+      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
       if (statusFilter !== 'all') params.append('provisioning_status', statusFilter);
-      
+      if (search) params.append('search', search);
+
       const response = await axios.get(`${API}/admin/terminals?${params}`);
-      setTerminals(response.data);
+      setTerminals(response.data.items);
+      setTotal(response.data.total);
     } catch (error) {
       toast.error('Failed to fetch terminals');
     } finally {
@@ -69,8 +83,8 @@ export default function TerminalsPage() {
 
   const fetchMerchants = async () => {
     try {
-      const response = await axios.get(`${API}/merchants`);
-      setMerchants(response.data);
+      const response = await axios.get(`${API}/merchants?page_size=500`);
+      setMerchants(response.data.items);
     } catch (error) {
       console.error('Failed to fetch merchants');
     }
@@ -125,14 +139,17 @@ export default function TerminalsPage() {
     });
   };
 
+  // Honest status labels: these track internal state only - no processor API
+  // is contacted, so we never claim a terminal was remotely "provisioned".
+  const STATUS_LABELS = {
+    draft: { label: 'Draft', style: 'badge-pending' },
+    provisioned: { label: 'Provisioning Tracked', style: 'badge-info' },
+    live: { label: 'Live (Confirmed)', style: 'badge-success' }
+  };
+
   const getStatusBadge = (status) => {
-    const styles = {
-      live: 'badge-success',
-      provisioned: 'badge-info',
-      ready: 'badge-warning',
-      draft: 'badge-pending'
-    };
-    return <span className={`badge ${styles[status] || 'badge-pending'}`}>{status}</span>;
+    const info = STATUS_LABELS[status] || { label: status, style: 'badge-pending' };
+    return <span className={`badge ${info.style}`}>{info.label}</span>;
   };
 
   const getMerchantName = (merchantId) => {
@@ -140,17 +157,17 @@ export default function TerminalsPage() {
     return merchant?.business_name || 'Unknown';
   };
 
-  const filteredTerminals = terminals.filter(t => 
-    t.terminal_number?.toLowerCase().includes(search.toLowerCase()) ||
-    t.merchant_number?.toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredTerminals = terminals;
 
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-slate-900">Terminals & Devices</h1>
-          <p className="text-slate-500 mt-1">Manage terminal profiles and provisioning</p>
+          <p className="text-slate-500 mt-1 flex items-center gap-1.5">
+            <Info size={14} className="text-slate-400" />
+            Internal terminal registry - status changes are tracked here; no processor API is contacted
+          </p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogTrigger asChild>
@@ -249,8 +266,8 @@ export default function TerminalsPage() {
               <SelectContent>
                 <SelectItem value="all">All Status</SelectItem>
                 <SelectItem value="draft">Draft</SelectItem>
-                <SelectItem value="provisioned">Provisioned</SelectItem>
-                <SelectItem value="live">Live</SelectItem>
+                <SelectItem value="provisioned">Provisioning Tracked</SelectItem>
+                <SelectItem value="live">Live (Confirmed)</SelectItem>
               </SelectContent>
             </Select>
             <Button variant="outline" onClick={fetchTerminals}>
@@ -307,13 +324,13 @@ export default function TerminalsPage() {
                               {terminal.provisioning_status === 'draft' && (
                                 <DropdownMenuItem onClick={() => handleProvision(terminal.id)}>
                                   <Zap size={14} className="mr-2" />
-                                  Mark Provisioned
+                                  Record Provisioning
                                 </DropdownMenuItem>
                               )}
                               {terminal.provisioning_status === 'provisioned' && (
                                 <DropdownMenuItem onClick={() => handleMarkLive(terminal.id)}>
                                   <CheckCircle size={14} className="mr-2" />
-                                  Mark Live
+                                  Confirm Live
                                 </DropdownMenuItem>
                               )}
                             </DropdownMenuContent>
@@ -324,6 +341,7 @@ export default function TerminalsPage() {
                   ))}
                 </tbody>
               </table>
+              <Pagination page={page} pageSize={pageSize} total={total} onPageChange={setPage} />
             </div>
           )}
         </CardContent>

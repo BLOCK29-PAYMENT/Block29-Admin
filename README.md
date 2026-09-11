@@ -6,7 +6,9 @@ Internal company admin for the Block29 ecosystem:
 - **Chain29** (chain29.com) — restaurant chain app
 - **Agent9** (agent9.com) — voice AI engine
 
-Manages merchants, TSYS VAR sheet intake, terminal profiles and provisioning status, transactions, reports, admin users/roles, and the audit trail.
+Manages merchants, TSYS VAR sheet intake, terminal profiles and provisioning status, transactions, reports, admin users/roles, the audit trail, and a live **Payment Hub operations console** (health checks, real terminal pings, go-live readiness, Hub mappings) against the AsterPOS Payment Hub. See `PAYMENT_HUB_ADMIN_API_MAP.md`, `ADMIN_RBAC_MATRIX.md`, and `ADMIN_FINAL_AUDIT.md`.
+
+Run migrations in `backend/migrations/` (001–004, manual, ordered) against the live MySQL before deploying this branch.
 
 ## Stack
 
@@ -30,7 +32,11 @@ Required environment variables (e.g. in `backend/.env`):
 | `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_USER` / `MYSQL_PASSWORD` / `MYSQL_DATABASE` | MySQL connection |
 | `JWT_SECRET` | **Required.** Token signing secret — server refuses to start without it |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | Optional. Seeds the first SUPER_ADMIN on startup if that email doesn't exist |
-| `CORS_ORIGINS` | Comma-separated allowed origins (defaults to `*`) |
+| `CORS_ORIGINS` | Comma-separated allowed origins (defaults to `*` with a startup warning — set it in production) |
+| `PAYMENT_HUB_URL` | AsterPOS Payment Hub base URL (e.g. `https://www.123cents.com`) |
+| `PAYMENT_HUB_ADMIN_KEY` | Hub `ADMIN_API_KEY`; sent server-to-server as `X-Admin-Key`, never to the browser |
+| `PAYMENT_HUB_ENV` | Environment label shown in the Hub console (`production` / `staging`) |
+| `PAYMENT_HUB_TIMEOUT_SECONDS` | Hub call timeout (default 10) |
 
 Frontend:
 

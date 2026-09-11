@@ -11,6 +11,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../components/ui/select';
+import Pagination from '../components/Pagination';
 import { toast } from 'sonner';
 import { ScrollText, RefreshCw, Download, Search, Filter, User, Clock, Activity, FileText, CreditCard, Store, Terminal } from 'lucide-react';
 
@@ -40,6 +41,9 @@ const RESOURCE_ICONS = {
 
 export default function SystemLogsPage() {
   const [logs, setLogs] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const pageSize = 100;
   const [loading, setLoading] = useState(true);
   const [actionTypes, setActionTypes] = useState([]);
   const [resourceTypes, setResourceTypes] = useState([]);
@@ -57,20 +61,24 @@ export default function SystemLogsPage() {
 
   useEffect(() => {
     fetchLogs();
+  }, [page]);
+
+  useEffect(() => {
     fetchFilterOptions();
   }, []);
 
   const fetchLogs = async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ limit: '200' });
+      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
       if (actionFilter !== 'all') params.append('action', actionFilter);
       if (resourceFilter !== 'all') params.append('resource_type', resourceFilter);
       if (startDate) params.append('start_date', startDate);
       if (endDate) params.append('end_date', endDate + 'T23:59:59');
-      
+
       const response = await axios.get(`${API}/logs?${params}`);
-      setLogs(response.data);
+      setLogs(response.data.items);
+      setTotal(response.data.total);
     } catch (error) {
       if (error.response?.status === 403) {
         toast.error('Admin access required');
@@ -163,9 +171,14 @@ export default function SystemLogsPage() {
       .join(', ');
   };
 
-  // Stats
+  // Stats - page-scoped stats are labeled as such in the UI
   const todayLogs = logs.filter(l => l.timestamp?.startsWith(new Date().toISOString().split('T')[0]));
   const uniqueUsers = [...new Set(logs.map(l => l.user_email).filter(Boolean))];
+
+  const applyFilters = () => {
+    if (page === 1) fetchLogs();
+    else setPage(1);
+  };
 
   return (
     <div className="space-y-6">
@@ -186,8 +199,8 @@ export default function SystemLogsPage() {
           <CardContent className="pt-5">
             <div className="flex items-center justify-between">
               <div>
-                <p className="overline mb-1">Total Logs</p>
-                <p className="text-2xl font-bold tabular-nums">{logs.length}</p>
+                <p className="overline mb-1">Total Logs (filtered)</p>
+                <p className="text-2xl font-bold tabular-nums">{total}</p>
               </div>
               <ScrollText className="h-8 w-8 text-slate-300" />
             </div>
@@ -197,7 +210,7 @@ export default function SystemLogsPage() {
           <CardContent className="pt-5">
             <div className="flex items-center justify-between">
               <div>
-                <p className="overline mb-1">Today's Activity</p>
+                <p className="overline mb-1">Today (this page)</p>
                 <p className="text-2xl font-bold tabular-nums">{todayLogs.length}</p>
               </div>
               <Clock className="h-8 w-8 text-slate-300" />
@@ -208,7 +221,7 @@ export default function SystemLogsPage() {
           <CardContent className="pt-5">
             <div className="flex items-center justify-between">
               <div>
-                <p className="overline mb-1">Active Users</p>
+                <p className="overline mb-1">Users (this page)</p>
                 <p className="text-2xl font-bold tabular-nums">{uniqueUsers.length}</p>
               </div>
               <User className="h-8 w-8 text-slate-300" />
@@ -237,7 +250,7 @@ export default function SystemLogsPage() {
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
                 <Input
-                  placeholder="Search logs..."
+                  placeholder="Filter loaded page..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="pl-10"
@@ -291,7 +304,7 @@ export default function SystemLogsPage() {
                 </SelectContent>
               </Select>
             </div>
-            <Button onClick={fetchLogs} disabled={loading} data-testid="apply-filters-btn">
+            <Button onClick={applyFilters} disabled={loading} data-testid="apply-filters-btn">
               {loading ? <RefreshCw className="animate-spin" size={16} /> : <Filter size={16} />}
             </Button>
           </div>
@@ -356,6 +369,7 @@ export default function SystemLogsPage() {
                   ))}
                 </tbody>
               </table>
+              <Pagination page={page} pageSize={pageSize} total={total} onPageChange={setPage} />
             </div>
           )}
         </CardContent>

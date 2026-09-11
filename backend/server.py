@@ -61,6 +61,30 @@ logger = logging.getLogger(__name__)
 # Client IP of the request currently being handled (set by middleware, read by audit logging)
 _client_ip = contextvars.ContextVar("client_ip", default="unknown")
 
+# ==================== LOGIN RATE LIMITING ====================
+# In-memory sliding window per (client_ip, email). Single-instance deployment;
+# move to a shared store if the API is ever scaled horizontally.
+LOGIN_MAX_FAILURES = 5
+LOGIN_WINDOW_SECONDS = 15 * 60
+_login_failures: Dict[str, List[float]] = {}
+
+def _rate_limit_key(email: str) -> str:
+    return f"{_client_ip.get()}|{email.lower()}"
+
+def login_rate_limited(email: str) -> bool:
+    import time
+    now = time.time()
+    attempts = [t for t in _login_failures.get(_rate_limit_key(email), []) if now - t < LOGIN_WINDOW_SECONDS]
+    _login_failures[_rate_limit_key(email)] = attempts
+    return len(attempts) >= LOGIN_MAX_FAILURES
+
+def record_login_failure(email: str):
+    import time
+    _login_failures.setdefault(_rate_limit_key(email), []).append(time.time())
+
+def clear_login_failures(email: str):
+    _login_failures.pop(_rate_limit_key(email), None)
+
 # ==================== DATABASE HELPER ====================
 
 async def get_db():
@@ -110,12 +134,24 @@ async def delete_row(table: str, where_clause: str, where_params: dict):
     query = f"DELETE FROM {table} WHERE {where_clause}"
     await execute_query(query, where_params)
 
+def clamp_pagination(page: int, page_size: int, max_page_size: int = 200):
+    """Normalize pagination inputs."""
+    return max(1, page), min(max(1, page_size), max_page_size)
+
+async def paginated(base_query: str, count_query: str, params: dict, page: int, page_size: int, order_by: str):
+    """Run a filtered query with a total count and LIMIT/OFFSET. order_by must be a code-owned literal."""
+    total_row = await fetch_one(count_query, params)
+    total = total_row["total"] if total_row else 0
+    offset = (page - 1) * page_size
+    items = await fetch_all(f"{base_query} ORDER BY {order_by} LIMIT {page_size} OFFSET {offset}", params)
+    return items, total
+
 # ==================== MODELS ====================
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str
-    name: str
+    password: str = Field(min_length=8, max_length=128)
+    name: str = Field(min_length=1, max_length=120)
     role: str = "READ_ONLY"
 
 class UserLogin(BaseModel):
@@ -130,7 +166,7 @@ class UserResponse(BaseModel):
     created_at: str
 
 class MerchantCreate(BaseModel):
-    business_name: str
+    business_name: str = Field(min_length=1, max_length=255)
     dba: Optional[str] = None
     tax_id: Optional[str] = None
     contact_email: Optional[str] = None
@@ -435,7 +471,12 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down...")
 
-app = FastAPI(title="Block29 Admin API", lifespan=lifespan)
+app = FastAPI(
+    title="Block29 Admin API",
+    description="Internal operations console for the Block29 ecosystem (AsterPOS, Chain29, Agent9): merchants, VAR sheets, terminal tracking, transactions, reports, users, and audit logs.",
+    version="1.1.0",
+    lifespan=lifespan
+)
 api_router = APIRouter(prefix="/api")
 
 @app.middleware("http")
@@ -444,9 +485,14 @@ async def capture_client_ip(request, call_next):
     ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "unknown")
     token = _client_ip.set(ip or "unknown")
     try:
-        return await call_next(request)
+        response = await call_next(request)
     finally:
         _client_ip.reset(token)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Cache-Control", "no-store")
+    return response
 
 async def create_tables():
     """Seed the initial SUPER_ADMIN account, only when explicitly configured via env vars."""
@@ -498,13 +544,20 @@ async def register(user: UserCreate, current_user: dict = Depends(require_roles(
 
 @api_router.post("/auth/login")
 async def login(credentials: UserLogin):
+    if login_rate_limited(credentials.email):
+        raise HTTPException(status_code=429, detail="Too many failed login attempts. Try again in 15 minutes.")
+
     user = await fetch_one("SELECT * FROM users WHERE email = :email", {"email": credentials.email})
     if not user or not user.get("password") or not verify_password(credentials.password, user["password"]):
+        record_login_failure(credentials.email)
+        await create_audit_log("", credentials.email, "LOGIN_FAILED", "user")
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     if user.get("is_active") in (0, False):
+        await create_audit_log(user["id"], user["email"], "LOGIN_FAILED", "user", user["id"], {"reason": "deactivated"})
         raise HTTPException(status_code=403, detail="Account is deactivated")
 
+    clear_login_failures(credentials.email)
     token = create_token(user["id"], user["email"], user["role"])
     await create_audit_log(user["id"], user["email"], "LOGIN", "user", user["id"])
     return {
@@ -528,8 +581,18 @@ async def get_me(user: dict = Depends(get_current_user)):
 # ==================== USER MANAGEMENT ====================
 
 @api_router.get("/users")
-async def list_users(user: dict = Depends(require_roles("SUPER_ADMIN"))):
-    users = await fetch_all("SELECT * FROM users")
+async def list_users(search: Optional[str] = None, page: int = 1, page_size: int = 50, user: dict = Depends(require_roles("SUPER_ADMIN"))):
+    page, page_size = clamp_pagination(page, page_size)
+    where = "FROM users WHERE 1=1"
+    params = {}
+    if search:
+        where += " AND (name LIKE :search OR email LIKE :search)"
+        params["search"] = f"%{search}%"
+
+    users, total = await paginated(
+        f"SELECT * {where}", f"SELECT COUNT(*) as total {where}", params, page, page_size, "created_at DESC"
+    )
+
     safe = []
     for u in users:
         safe.append({
@@ -540,7 +603,7 @@ async def list_users(user: dict = Depends(require_roles("SUPER_ADMIN"))):
             "is_active": 0 if u.get("is_active") in (0, False) else 1,
             "created_at": str(u.get("created_at")) if u.get("created_at") else None
         })
-    return safe
+    return {"items": safe, "total": total, "page": page, "page_size": page_size}
 
 @api_router.put("/users/{user_id}/role")
 async def update_user_role(user_id: str, role: str, user: dict = Depends(require_roles("SUPER_ADMIN"))):
@@ -572,6 +635,17 @@ async def update_user_status(user_id: str, update: UserStatusUpdate, user: dict 
 
 @api_router.post("/merchants")
 async def create_merchant(merchant: MerchantCreate, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
+    merchant.business_name = merchant.business_name.strip()
+    if not merchant.business_name:
+        raise HTTPException(status_code=400, detail="Business name is required")
+
+    duplicate = await fetch_one(
+        "SELECT id FROM merchants WHERE LOWER(business_name) = LOWER(:name)",
+        {"name": merchant.business_name}
+    )
+    if duplicate:
+        raise HTTPException(status_code=400, detail="A merchant with this business name already exists")
+
     merchant_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     
@@ -592,25 +666,27 @@ async def create_merchant(merchant: MerchantCreate, user: dict = Depends(require
     return {"id": merchant_id, **merchant.model_dump(), "created_at": created_at}
 
 @api_router.get("/merchants")
-async def list_merchants(status: Optional[str] = None, search: Optional[str] = None, user: dict = Depends(get_current_user)):
-    query = "SELECT * FROM merchants WHERE 1=1"
+async def list_merchants(status: Optional[str] = None, search: Optional[str] = None, page: int = 1, page_size: int = 50, user: dict = Depends(get_current_user)):
+    page, page_size = clamp_pagination(page, page_size, max_page_size=500)
+    where = "FROM merchants WHERE 1=1"
     params = {}
-    
+
     if status:
-        query += " AND status = :status"
+        where += " AND status = :status"
         params["status"] = status
     if search:
-        query += " AND (business_name LIKE :search OR dba LIKE :search)"
+        where += " AND (business_name LIKE :search OR dba LIKE :search)"
         params["search"] = f"%{search}%"
-    
-    query += " ORDER BY created_at DESC"
-    merchants = await fetch_all(query, params)
-    
+
+    merchants, total = await paginated(
+        f"SELECT * {where}", f"SELECT COUNT(*) as total {where}", params, page, page_size, "created_at DESC"
+    )
+
     for m in merchants:
         m["created_at"] = str(m["created_at"]) if m["created_at"] else None
         m["updated_at"] = str(m["updated_at"]) if m.get("updated_at") else None
-    
-    return merchants
+
+    return {"items": merchants, "total": total, "page": page, "page_size": page_size}
 
 @api_router.get("/merchants/{merchant_id}")
 async def get_merchant(merchant_id: str, user: dict = Depends(get_current_user)):
@@ -785,26 +861,31 @@ async def create_terminal(terminal: TerminalProfileCreate, user: dict = Depends(
     return data
 
 @api_router.get("/admin/terminals")
-async def list_terminals(merchant_id: Optional[str] = None, provisioning_status: Optional[str] = None, user: dict = Depends(get_current_user)):
-    query = "SELECT * FROM terminal_profiles WHERE 1=1"
+async def list_terminals(merchant_id: Optional[str] = None, provisioning_status: Optional[str] = None, search: Optional[str] = None, page: int = 1, page_size: int = 50, user: dict = Depends(get_current_user)):
+    page, page_size = clamp_pagination(page, page_size)
+    where = "FROM terminal_profiles WHERE 1=1"
     params = {}
-    
+
     if merchant_id:
-        query += " AND merchant_id = :merchant_id"
+        where += " AND merchant_id = :merchant_id"
         params["merchant_id"] = merchant_id
     if provisioning_status:
-        query += " AND provisioning_status = :provisioning_status"
+        where += " AND provisioning_status = :provisioning_status"
         params["provisioning_status"] = provisioning_status
-    
-    query += " ORDER BY created_at DESC"
-    terminals = await fetch_all(query, params)
-    
+    if search:
+        where += " AND (terminal_number LIKE :search OR merchant_number LIKE :search OR v_number LIKE :search)"
+        params["search"] = f"%{search}%"
+
+    terminals, total = await paginated(
+        f"SELECT * {where}", f"SELECT COUNT(*) as total {where}", params, page, page_size, "created_at DESC"
+    )
+
     for t in terminals:
         t["created_at"] = str(t["created_at"]) if t["created_at"] else None
         t["card_types"] = json.loads(t["card_types"]) if t.get("card_types") else []
         t["networks"] = json.loads(t["networks"]) if t.get("networks") else []
-    
-    return terminals
+
+    return {"items": terminals, "total": total, "page": page, "page_size": page_size}
 
 @api_router.get("/admin/terminals/{terminal_id}")
 async def get_terminal(terminal_id: str, user: dict = Depends(get_current_user)):
@@ -869,31 +950,50 @@ async def mark_terminal_live(terminal_id: str, user: dict = Depends(require_role
 # ==================== TRANSACTIONS ====================
 
 @api_router.get("/transactions")
-async def list_transactions(merchant_id: Optional[str] = None, status: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
-    query = "SELECT * FROM transactions WHERE 1=1"
+async def list_transactions(merchant_id: Optional[str] = None, status: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, page: int = 1, page_size: int = 50, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
+    page, page_size = clamp_pagination(page, page_size)
+    where = "FROM transactions WHERE 1=1"
     params = {}
-    
+
     if merchant_id:
-        query += " AND merchant_id = :merchant_id"
+        where += " AND merchant_id = :merchant_id"
         params["merchant_id"] = merchant_id
     if status:
-        query += " AND status = :status"
+        where += " AND status = :status"
         params["status"] = status
     if start_date:
-        query += " AND created_at >= :start_date"
+        where += " AND created_at >= :start_date"
         params["start_date"] = start_date
     if end_date:
-        query += " AND created_at <= :end_date"
+        where += " AND created_at <= :end_date"
         params["end_date"] = end_date
-    
-    query += " ORDER BY created_at DESC LIMIT 1000"
-    transactions = await fetch_all(query, params)
-    
+
+    transactions, total = await paginated(
+        f"SELECT * {where}", f"SELECT COUNT(*) as total {where}", params, page, page_size, "created_at DESC"
+    )
+
+    # Summary over the FULL filtered set (not just the current page), so UI totals are accurate
+    summary_row = await fetch_one(
+        f"SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as volume, "
+        f"SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved {where}",
+        params
+    )
+
     for t in transactions:
         t["created_at"] = str(t["created_at"]) if t["created_at"] else None
         t["amount"] = float(t["amount"]) if t.get("amount") else 0
-    
-    return transactions
+
+    return {
+        "items": transactions,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "summary": {
+            "count": summary_row["count"] if summary_row else 0,
+            "volume": float(summary_row["volume"]) if summary_row and summary_row["volume"] else 0,
+            "approved": int(summary_row["approved"]) if summary_row and summary_row["approved"] else 0
+        }
+    }
 
 # ==================== REPORTS ====================
 
@@ -986,7 +1086,7 @@ async def get_batch_report(start_date: str, end_date: str, merchant_id: Optional
             "total_batches": len(batch_list),
             "total_sales": round(sum(b["sales_amount"] for b in batch_list), 2),
             "total_refunds": round(sum(b["refund_amount"] for b in batch_list), 2),
-            "net_settlement": round(sum(b["net_amount"] for b in batch_list), 2)
+            "net_total": round(sum(b["net_amount"] for b in batch_list), 2)
         },
         "batches": batch_list,
         "report_generated": datetime.now(timezone.utc).isoformat()
@@ -1001,9 +1101,10 @@ async def export_transactions_csv(start_date: str, end_date: str, merchant_id: O
         query += " AND merchant_id = :merchant_id"
         params["merchant_id"] = merchant_id
     
-    query += " ORDER BY created_at DESC"
+    # Bounded export: cap at 10,000 rows to avoid unbounded memory/response size
+    query += " ORDER BY created_at DESC LIMIT 10000"
     transactions = await fetch_all(query, params)
-    
+
     csv_data = []
     for tx in transactions:
         csv_data.append({
@@ -1016,46 +1117,47 @@ async def export_transactions_csv(start_date: str, end_date: str, merchant_id: O
             "Card Last 4": tx.get("card_last_four", "****"),
             "Status": tx.get("status"),
             "Auth Code": tx.get("auth_code", ""),
-            "Entry Mode": tx.get("entry_mode", ""),
-            "Cardholder": tx.get("cardholder_name", "")
+            "Entry Mode": tx.get("entry_mode", "")
         })
-    
+
     await create_audit_log(user["user_id"], user["email"], "EXPORT", "report", None, {"type": "transactions", "count": len(csv_data)})
-    
-    return {"data": csv_data, "count": len(csv_data)}
+
+    return {"data": csv_data, "count": len(csv_data), "truncated": len(csv_data) == 10000}
 
 # ==================== SYSTEM LOGS ====================
 
 @api_router.get("/logs")
-async def get_system_logs(limit: int = 100, action: Optional[str] = None, resource_type: Optional[str] = None, user_id: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, user: dict = Depends(require_roles("SUPER_ADMIN"))):
-    query = "SELECT * FROM audit_logs WHERE 1=1"
+async def get_system_logs(action: Optional[str] = None, resource_type: Optional[str] = None, user_id: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, page: int = 1, page_size: int = 100, user: dict = Depends(require_roles("SUPER_ADMIN"))):
+    page, page_size = clamp_pagination(page, page_size, max_page_size=500)
+    where = "FROM audit_logs WHERE 1=1"
     params = {}
-    
+
     if action:
-        query += " AND action = :action"
+        where += " AND action = :action"
         params["action"] = action
     if resource_type:
-        query += " AND resource_type = :resource_type"
+        where += " AND resource_type = :resource_type"
         params["resource_type"] = resource_type
     if user_id:
-        query += " AND user_id = :filter_user_id"
+        where += " AND user_id = :filter_user_id"
         params["filter_user_id"] = user_id
     if start_date:
-        query += " AND timestamp >= :start_date"
+        where += " AND timestamp >= :start_date"
         params["start_date"] = start_date
     if end_date:
-        query += " AND timestamp <= :end_date"
+        where += " AND timestamp <= :end_date"
         params["end_date"] = end_date
-    
-    query += f" ORDER BY timestamp DESC LIMIT {limit}"
-    logs = await fetch_all(query, params)
-    
+
+    logs, total = await paginated(
+        f"SELECT * {where}", f"SELECT COUNT(*) as total {where}", params, page, page_size, "timestamp DESC"
+    )
+
     for log in logs:
         log["timestamp"] = str(log["timestamp"]) if log["timestamp"] else None
         if log.get("details"):
             log["details"] = json.loads(log["details"]) if isinstance(log["details"], str) else log["details"]
-    
-    return logs
+
+    return {"items": logs, "total": total, "page": page, "page_size": page_size}
 
 @api_router.get("/logs/actions")
 async def get_log_action_types(user: dict = Depends(require_roles("SUPER_ADMIN"))):
@@ -1069,10 +1171,11 @@ async def get_log_action_types(user: dict = Depends(require_roles("SUPER_ADMIN")
 @api_router.get("/logs/export")
 async def export_audit_logs(start_date: str, end_date: str, user: dict = Depends(require_roles("SUPER_ADMIN"))):
     logs = await fetch_all(
-        "SELECT * FROM audit_logs WHERE timestamp >= :start_date AND timestamp <= :end_date ORDER BY timestamp DESC",
+        "SELECT * FROM audit_logs WHERE timestamp >= :start_date AND timestamp <= :end_date ORDER BY timestamp DESC LIMIT 10000",
         {"start_date": start_date, "end_date": end_date}
     )
-    
+    await create_audit_log(user["user_id"], user["email"], "EXPORT", "report", None, {"type": "audit_logs", "count": len(logs)})
+
     csv_data = []
     for log in logs:
         csv_data.append({
@@ -1148,7 +1251,291 @@ async def get_dashboard_stats(user: dict = Depends(get_current_user)):
         }
     }
 
+# ==================== PAYMENT HUB OPERATIONS ====================
+# Control-plane only: the admin calls the Payment Hub's LIVE canonical APIs
+# (see hub.py header and PAYMENT_HUB_ADMIN_API_MAP.md). No Hub business logic
+# is reimplemented here; no financial operations exist. Diagnostics are pinned
+# to real Hub/device responses - anything unprovable reports UNKNOWN.
+
+import hub as hub_client
+
+class HubMerchantLink(BaseModel):
+    hub_merchant_id: str = Field(min_length=1, max_length=64)
+
+class HubTerminalLink(BaseModel):
+    hub_terminal_id: str = Field(min_length=1, max_length=64)
+    terminal_serial: Optional[str] = Field(default=None, max_length=64)
+
+class BulkPingRequest(BaseModel):
+    profile_ids: List[str] = Field(min_length=1, max_length=50)
+
+def _overall_hub_status(checks: List[Dict[str, Any]]) -> str:
+    statuses = [c["status"] for c in checks]
+    if all(s == "ONLINE" for s in statuses):
+        return "ONLINE"
+    if all(s == "NOT_CONFIGURED" for s in statuses):
+        return "NOT_CONFIGURED"
+    if any(s == "OFFLINE" for s in statuses) and not any(s == "ONLINE" for s in statuses):
+        return "OFFLINE"
+    if any(s in ("OFFLINE", "DEGRADED", "UNKNOWN") for s in statuses) and any(s == "ONLINE" for s in statuses):
+        return "DEGRADED"
+    return "UNKNOWN"
+
+@api_router.get("/hub/status")
+async def hub_status(manual: bool = False, user: dict = Depends(get_current_user)):
+    correlation_id = hub_client.new_correlation_id()
+    health = await hub_client.hub_health(correlation_id)
+    ready = await hub_client.hub_ready(correlation_id)
+    alerts = await hub_client.hub_alerts(correlation_id)
+
+    checks = [
+        {"test": "Hub API /health", **{k: health[k] for k in ("status", "latency_ms", "detail")}},
+        {"test": "Hub /ready (dependencies)", **{k: ready[k] for k in ("status", "latency_ms", "detail")}},
+        {"test": "Hub metrics/alerts", **{k: alerts[k] for k in ("status", "latency_ms", "detail")}},
+    ]
+
+    # Surface real triggered alerts from the Hub, if any
+    triggered_alerts = None
+    if alerts["status"] == "ONLINE" and isinstance(alerts.get("data"), dict):
+        triggered_alerts = alerts["data"]
+
+    if manual:
+        await create_audit_log(user["user_id"], user["email"], "HUB_HEALTH_CHECK", "hub", None,
+                               {"correlation_id": correlation_id, "overall": _overall_hub_status(checks)})
+
+    return {
+        "configured": hub_client.hub_configured(),
+        "environment": hub_client.PAYMENT_HUB_ENV,
+        "overall": _overall_hub_status(checks),
+        "checks": checks,
+        "dependencies": ready.get("data") if ready["status"] == "ONLINE" else None,
+        "alerts": triggered_alerts,
+        "correlation_id": correlation_id,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+@api_router.get("/hub/merchants/{merchant_id}/hub-view")
+async def hub_merchant_view(merchant_id: str, user: dict = Depends(get_current_user)):
+    """Live Hub view of one ADMIN merchant: Hub record, processor profiles with
+    cached connectivity, terminals, and routing config."""
+    merchant = await fetch_one("SELECT id, business_name FROM merchants WHERE id = :id", {"id": merchant_id})
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+
+    link = await fetch_one("SELECT hub_merchant_id FROM hub_merchant_links WHERE merchant_id = :id", {"id": merchant_id})
+    if not link:
+        return {"linked": False, "detail": "Merchant is not linked to the Payment Hub yet"}
+
+    lookup = await hub_client.hub_merchant_lookup(link["hub_merchant_id"])
+    routing = None
+    terminals = None
+    if lookup["status"] == "ONLINE" and isinstance(lookup.get("data"), dict):
+        hub_int_id = lookup["data"].get("id")
+        if hub_int_id is not None:
+            routing = await hub_client.hub_payment_path(str(hub_int_id))
+            terminals = await hub_client.hub_merchant_terminals(str(hub_int_id))
+
+    return {
+        "linked": True,
+        "hub_merchant_id": link["hub_merchant_id"],
+        "environment": hub_client.PAYMENT_HUB_ENV,
+        "lookup": lookup,
+        "routing": routing,
+        "terminals": terminals,
+    }
+
+@api_router.post("/hub/profiles/{profile_id}/ping")
+async def hub_ping_profile(profile_id: str, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
+    """Real device probe via the Hub (SPIn ConnectionStatus / Valor device info)."""
+    correlation_id = hub_client.new_correlation_id()
+    result = await hub_client.hub_profile_ping(profile_id, correlation_id)
+    state = hub_client.ping_state(result)
+    await create_audit_log(user["user_id"], user["email"], "TERMINAL_PING", "hub_profile", profile_id,
+                           {"correlation_id": correlation_id, "state": state,
+                            "latency_ms": result["latency_ms"], "detail": result["detail"]})
+    return {"environment": hub_client.PAYMENT_HUB_ENV, "state": state,
+            "checked_at": datetime.now(timezone.utc).isoformat(), **result}
+
+@api_router.post("/hub/profiles/bulk-ping")
+async def hub_bulk_ping(request: BulkPingRequest, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
+    correlation_id = hub_client.new_correlation_id()
+    if not hub_client.hub_configured():
+        raise HTTPException(status_code=503, detail="Payment Hub is not configured")
+    result = await hub_client.bulk_profile_ping(request.profile_ids, correlation_id)
+    await create_audit_log(user["user_id"], user["email"], "TERMINAL_BULK_PING", "hub_profile", None,
+                           {"correlation_id": correlation_id, "counts": result["counts"], "pinged": result["pinged"]})
+    return {"environment": hub_client.PAYMENT_HUB_ENV, "correlation_id": correlation_id, **result}
+
+@api_router.get("/hub/events")
+async def hub_events_view(user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
+    stats = await hub_client.hub_events_stats()
+    undelivered = await hub_client.hub_events_undelivered(limit=50)
+    return {"environment": hub_client.PAYMENT_HUB_ENV, "stats": stats, "undelivered": undelivered}
+
+# ---- persisted Hub mappings (references to canonical records, no duplication) ----
+
+@api_router.get("/hub/links")
+async def hub_links_list(user: dict = Depends(get_current_user)):
+    merchants = await fetch_all("SELECT * FROM hub_merchant_links")
+    terminals = await fetch_all("SELECT * FROM hub_terminal_links")
+    for row in merchants + terminals:
+        row["created_at"] = str(row["created_at"]) if row.get("created_at") else None
+        row["updated_at"] = str(row["updated_at"]) if row.get("updated_at") else None
+    return {"merchant_links": merchants, "terminal_links": terminals}
+
+@api_router.put("/hub/links/merchants/{merchant_id}")
+async def hub_link_merchant(merchant_id: str, link: HubMerchantLink, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
+    merchant = await fetch_one("SELECT id FROM merchants WHERE id = :id", {"id": merchant_id})
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+
+    # Verify the identifier against the live Hub before persisting; save is
+    # allowed while the Hub is unreachable, but verification state is reported.
+    verification = await hub_client.hub_merchant_lookup(link.hub_merchant_id)
+    if verification["status"] == "ONLINE" and verification.get("http_status") == 200:
+        verified = True
+    elif verification.get("http_status") == 404:
+        raise HTTPException(status_code=400, detail=f"Hub has no merchant '{link.hub_merchant_id}' (checked live)")
+    else:
+        verified = False
+
+    now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    existing = await fetch_one("SELECT merchant_id FROM hub_merchant_links WHERE merchant_id = :id", {"id": merchant_id})
+    if existing:
+        await update_row("hub_merchant_links",
+                         {"hub_merchant_id": link.hub_merchant_id, "environment": hub_client.PAYMENT_HUB_ENV, "updated_at": now},
+                         "merchant_id = :id", {"id": merchant_id})
+    else:
+        await insert_row("hub_merchant_links", {
+            "merchant_id": merchant_id, "hub_merchant_id": link.hub_merchant_id,
+            "environment": hub_client.PAYMENT_HUB_ENV, "created_by": user["user_id"], "created_at": now})
+
+    await create_audit_log(user["user_id"], user["email"], "MERCHANT_HUB_LINK", "merchant", merchant_id,
+                           {"hub_merchant_id": link.hub_merchant_id, "environment": hub_client.PAYMENT_HUB_ENV,
+                            "verified_against_hub": verified})
+    return {"merchant_id": merchant_id, "hub_merchant_id": link.hub_merchant_id,
+            "environment": hub_client.PAYMENT_HUB_ENV, "verified_against_hub": verified,
+            "verification_detail": verification["detail"]}
+
+@api_router.put("/hub/links/terminals/{terminal_id}")
+async def hub_link_terminal(terminal_id: str, link: HubTerminalLink, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
+    terminal = await fetch_one("SELECT id FROM terminal_profiles WHERE id = :id", {"id": terminal_id})
+    if not terminal:
+        raise HTTPException(status_code=404, detail="Terminal not found")
+
+    now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    existing = await fetch_one("SELECT terminal_id FROM hub_terminal_links WHERE terminal_id = :id", {"id": terminal_id})
+    if existing:
+        await update_row("hub_terminal_links",
+                         {"hub_terminal_id": link.hub_terminal_id, "terminal_serial": link.terminal_serial,
+                          "environment": hub_client.PAYMENT_HUB_ENV, "updated_at": now},
+                         "terminal_id = :id", {"id": terminal_id})
+    else:
+        await insert_row("hub_terminal_links", {
+            "terminal_id": terminal_id, "hub_terminal_id": link.hub_terminal_id,
+            "terminal_serial": link.terminal_serial, "environment": hub_client.PAYMENT_HUB_ENV,
+            "created_by": user["user_id"], "created_at": now})
+
+    await create_audit_log(user["user_id"], user["email"], "TERMINAL_HUB_LINK", "terminal", terminal_id,
+                           {"hub_terminal_id": link.hub_terminal_id, "environment": hub_client.PAYMENT_HUB_ENV})
+    return {"terminal_id": terminal_id, "hub_terminal_id": link.hub_terminal_id, "environment": hub_client.PAYMENT_HUB_ENV}
+
+# ---- readiness (computed from real records + real Hub responses; UNKNOWN stays UNKNOWN) ----
+
+def _readiness_overall(checks: List[Dict[str, str]]) -> str:
+    critical = [c for c in checks if c.get("critical")]
+    if any(c["status"] == "FAIL" for c in critical):
+        return "NOT_READY"
+    if any(c["status"] == "UNKNOWN" for c in critical):
+        return "NOT_READY"  # never mark ready while critical checks are unknown
+    if any(c["status"] in ("WARN", "UNKNOWN", "FAIL") for c in checks):
+        return "DEGRADED"
+    return "READY"
+
+@api_router.get("/hub/merchants/{merchant_id}/readiness")
+async def merchant_go_live_readiness(merchant_id: str, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
+    correlation_id = hub_client.new_correlation_id()
+    checks: List[Dict[str, Any]] = []
+
+    merchant = await fetch_one("SELECT * FROM merchants WHERE id = :id", {"id": merchant_id})
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+    checks.append({"check": "Merchant record", "critical": True,
+                   "status": "PASS" if merchant.get("status") == "active" else "FAIL",
+                   "detail": f"status={merchant.get('status')}"})
+
+    var_ok = await fetch_one(
+        "SELECT COUNT(*) as count FROM varsheet_uploads WHERE merchant_id = :id AND parse_status = 'success'",
+        {"id": merchant_id})
+    checks.append({"check": "VAR data", "critical": False,
+                   "status": "PASS" if var_ok and var_ok["count"] else "WARN",
+                   "detail": f"{var_ok['count'] if var_ok else 0} parsed VAR sheet(s)"})
+
+    terminals = await fetch_all("SELECT id, terminal_number FROM terminal_profiles WHERE merchant_id = :id", {"id": merchant_id})
+    checks.append({"check": "Terminals registered", "critical": True,
+                   "status": "PASS" if terminals else "FAIL",
+                   "detail": f"{len(terminals)} terminal(s) in admin registry"})
+
+    hub_link = await fetch_one("SELECT hub_merchant_id FROM hub_merchant_links WHERE merchant_id = :id", {"id": merchant_id})
+    checks.append({"check": "Hub merchant mapping", "critical": True,
+                   "status": "PASS" if hub_link else "FAIL",
+                   "detail": hub_link["hub_merchant_id"] if hub_link else "not linked"})
+
+    health = await hub_client.hub_health(correlation_id)
+    checks.append({"check": "Hub reachable", "critical": True,
+                   "status": {"ONLINE": "PASS", "OFFLINE": "FAIL"}.get(health["status"], "UNKNOWN"),
+                   "detail": health["detail"] or f"{health['latency_ms']} ms"})
+
+    # Live Hub merchant lookup + real per-profile device pings
+    profiles = []
+    if hub_link and health["status"] == "ONLINE":
+        lookup = await hub_client.hub_merchant_lookup(hub_link["hub_merchant_id"])
+        if lookup["status"] == "ONLINE" and isinstance(lookup.get("data"), dict):
+            checks.append({"check": "Hub merchant record", "critical": True, "status": "PASS",
+                           "detail": f"hub id {lookup['data'].get('id')} / {lookup['data'].get('hub_mid', '')}"})
+            profiles = lookup["data"].get("profiles") or []
+            routing = await hub_client.hub_payment_path(str(lookup["data"].get("id")))
+            checks.append({"check": "Processor route configured", "critical": True,
+                           "status": "PASS" if routing["status"] == "ONLINE" and routing.get("data") else
+                                     ("UNKNOWN" if routing["status"] in ("UNKNOWN", "NOT_CONFIGURED") else "FAIL"),
+                           "detail": routing["detail"] or "payment path present"})
+        elif lookup.get("http_status") == 404:
+            checks.append({"check": "Hub merchant record", "critical": True, "status": "FAIL",
+                           "detail": f"Hub has no merchant '{hub_link['hub_merchant_id']}'"})
+        else:
+            checks.append({"check": "Hub merchant record", "critical": True, "status": "UNKNOWN",
+                           "detail": lookup["detail"]})
+    else:
+        checks.append({"check": "Hub merchant record", "critical": True, "status": "UNKNOWN",
+                       "detail": "not linked" if not hub_link else "hub not reachable"})
+
+    profile_ids = [p.get("id") for p in profiles if p.get("id")]
+    if profile_ids:
+        ping = await hub_client.bulk_profile_ping([str(p) for p in profile_ids[:10]], correlation_id)
+        c = ping["counts"]
+        if c["online"] == len(profile_ids[:10]):
+            p_status = "PASS"
+        elif c["online"]:
+            p_status = "WARN"
+        elif c["offline"]:
+            p_status = "FAIL"
+        else:
+            p_status = "UNKNOWN"
+        checks.append({"check": "Terminal ping (live probe)", "critical": False, "status": p_status,
+                       "detail": f"online {c['online']} / offline {c['offline']} / unknown {c['unknown']}"})
+    else:
+        checks.append({"check": "Terminal ping (live probe)", "critical": False, "status": "UNKNOWN",
+                       "detail": "no Hub processor profiles found"})
+
+    overall = _readiness_overall(checks)
+    await create_audit_log(user["user_id"], user["email"], "READINESS_CHECK", "merchant", merchant_id,
+                           {"correlation_id": correlation_id, "overall": overall})
+    return {"merchant_id": merchant_id, "environment": hub_client.PAYMENT_HUB_ENV,
+            "overall": overall, "checks": checks, "correlation_id": correlation_id,
+            "checked_at": datetime.now(timezone.utc).isoformat()}
+
 # ==================== ROOT ====================
+
 
 @api_router.get("/")
 async def root():
@@ -1165,10 +1552,15 @@ async def health():
 # Include router and middleware
 app.include_router(api_router)
 
+# Auth uses Bearer tokens (no cookies), so credentialed CORS is unnecessary.
+# Set CORS_ORIGINS to the admin frontend origin(s) in production instead of '*'.
+_cors_origins = [o.strip() for o in os.environ.get('CORS_ORIGINS', '*').split(',') if o.strip()]
+if _cors_origins == ['*']:
+    logger.warning("CORS_ORIGINS is '*' - set it to the admin frontend origin in production")
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_credentials=False,
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )

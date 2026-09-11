@@ -19,3 +19,4 @@ aiofiles==25.1.0
 # Testing
 requests==2.32.5
 pytest==9.0.2
+httpx==0.28.1

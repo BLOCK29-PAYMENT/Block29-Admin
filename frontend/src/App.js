@@ -7,6 +7,7 @@ import MerchantsPage from "./pages/MerchantsPage";
 import VarSheetPage from "./pages/VarSheetPage";
 import TerminalsPage from "./pages/TerminalsPage";
 import TransactionsPage from "./pages/TransactionsPage";
+import PaymentHubPage from "./pages/PaymentHubPage";
 import UsersPage from "./pages/UsersPage";
 import ReportsPage from "./pages/ReportsPage";
 import SystemLogsPage from "./pages/SystemLogsPage";
@@ -47,6 +48,7 @@ function App() {
                     <Route path="/varsheet" element={<VarSheetPage />} />
                     <Route path="/terminals" element={<TerminalsPage />} />
                     <Route path="/transactions" element={<TransactionsPage />} />
+                    <Route path="/hub" element={<PaymentHubPage />} />
                     <Route path="/reports" element={<ReportsPage />} />
                     <Route path="/users" element={<UsersPage />} />
                     <Route path="/logs" element={<SystemLogsPage />} />

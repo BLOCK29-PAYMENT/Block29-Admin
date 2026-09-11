@@ -37,8 +37,8 @@ export default function VarSheetPage() {
 
   const fetchMerchants = async () => {
     try {
-      const response = await axios.get(`${API}/merchants`);
-      setMerchants(response.data);
+      const response = await axios.get(`${API}/merchants?page_size=500`);
+      setMerchants(response.data.items);
     } catch (error) {
       console.error('Failed to fetch merchants:', error);
     }
