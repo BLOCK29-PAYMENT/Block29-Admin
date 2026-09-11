@@ -491,6 +491,7 @@ export default function PaymentHubPage() {
               <CardDescription>
                 Persisted references to Hub merchant records (Hub user UUID, hub_mid, or Hub id).
                 Saving verifies the identifier against the live Hub.
+                {merchants.length >= 500 && ' Showing the first 500 merchants - use the Merchants page search to find others.'}
               </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
@@ -525,7 +526,10 @@ export default function PaymentHubPage() {
           <Card>
             <CardHeader>
               <CardTitle className="text-base">Terminal Mappings</CardTitle>
-              <CardDescription>Admin terminal registry rows mapped to Hub terminal IDs / device serials.</CardDescription>
+              <CardDescription>
+                Admin terminal registry rows mapped to Hub terminal IDs / device serials.
+                {adminTerminals.length >= 200 && ' Showing the first 200 terminals.'}
+              </CardDescription>
             </CardHeader>
             <CardContent className="p-0">
               <div className="overflow-x-auto">

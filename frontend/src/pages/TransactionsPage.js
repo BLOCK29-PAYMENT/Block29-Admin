@@ -12,6 +12,7 @@ import {
   SelectValue,
 } from '../components/ui/select';
 import Pagination from '../components/Pagination';
+import { downloadCsv } from '../lib/csv';
 import { toast } from 'sonner';
 import { Receipt, RefreshCw, Download } from 'lucide-react';
 
@@ -77,18 +78,7 @@ export default function TransactionsPage() {
         return;
       }
 
-      const headers = Object.keys(data[0]);
-      const csvContent = [
-        headers.join(','),
-        ...data.map(row => headers.map(h => `"${row[h] ?? ''}"`).join(','))
-      ].join('\n');
-
-      const blob = new Blob([csvContent], { type: 'text/csv' });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `transactions_export_${new Date().toISOString().split('T')[0]}.csv`;
-      a.click();
+      downloadCsv(data, `transactions_export_${new Date().toISOString().split('T')[0]}.csv`);
 
       if (response.data.truncated) {
         toast.warning(`Exported first 10,000 records - narrow the date range for the full set`);

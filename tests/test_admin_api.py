@@ -38,11 +38,16 @@ class FakeDB:
         self.inserts = []
         self.updates = []
         self.deletes = []
+        # Row returned for the per-request token-holder activation check
+        # (get_current_user); None simulates a deleted account.
+        self.current_user_row = {"is_active": 1}
 
     async def fetch_one(self, query, params=None):
         q = " ".join(query.split()).lower()
         if "from users where email" in q:
             return self.users.get((params or {}).get("email"))
+        if "select is_active from users where id" in q:
+            return self.current_user_row
         if self.one_results:
             return self.one_results.pop(0)
         return None
@@ -253,7 +258,8 @@ def test_merchant_delete_ok_without_dependencies(db):
     db.one_results = [{"count": 0}, {"count": 0}]
     r = client.delete("/api/merchants/m1", headers=auth())
     assert r.status_code == 200
-    assert len(db.deletes) == 1
+    # merchant row + its hub mapping (prevents orphaned unique-key rows)
+    assert len(db.deletes) == 2
 
 
 # ---------------- pagination envelopes ----------------
@@ -429,3 +435,51 @@ def test_hub_secrets_never_reach_browser_payloads():
     assert "PAYMENT_HUB_ADMIN_KEY" in src
     # the key is only used for the outbound header, never returned
     assert 'data["admin_key"]' not in src and "return PAYMENT_HUB_ADMIN_KEY" not in src
+
+
+# ---------------- code-review regression fixes ----------------
+
+def test_deactivated_user_token_revoked_immediately(db):
+    """Deactivation must cut off existing tokens, not wait for expiry."""
+    db.current_user_row = {"is_active": 0}
+    r = client.get("/api/merchants", headers=auth())
+    assert r.status_code == 403
+
+
+def test_deleted_user_token_rejected(db):
+    db.current_user_row = None
+    r = client.get("/api/merchants", headers=auth())
+    assert r.status_code == 401
+
+
+def test_xff_spoofing_cannot_bypass_login_rate_limit(db):
+    """TRUSTED_PROXY_HOPS defaults to 0: X-Forwarded-For is ignored, so a
+    brute-forcer rotating XFF values still hits the same rate-limit key."""
+    db.users["admin@block29.com"] = make_user()
+    for i in range(server.LOGIN_MAX_FAILURES):
+        client.post("/api/auth/login",
+                    json={"email": "admin@block29.com", "password": "wrong"},
+                    headers={"X-Forwarded-For": f"10.0.0.{i}"})
+    r = client.post("/api/auth/login",
+                    json={"email": "admin@block29.com", "password": "correct-password"},
+                    headers={"X-Forwarded-For": "10.9.9.9"})
+    assert r.status_code == 429
+
+
+def test_cannot_change_own_role(db):
+    r = client.put("/api/users/u1/role?role=READ_ONLY", headers=auth())
+    assert r.status_code == 400
+
+
+def test_role_change_unknown_user_404(db):
+    db.one_results = [None]  # target lookup
+    r = client.put("/api/users/u2/role?role=READ_ONLY", headers=auth())
+    assert r.status_code == 404
+
+
+def test_login_failure_tracker_bounded():
+    server._login_failures.clear()
+    server._login_failures.update({f"stale|{i}": [0.0] for i in range(6000)})
+    server.record_login_failure("new@block29.com")
+    assert len(server._login_failures) < 6000  # stale keys pruned
+    server._login_failures.clear()

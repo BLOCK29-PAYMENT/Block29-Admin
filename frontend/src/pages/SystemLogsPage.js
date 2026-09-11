@@ -12,6 +12,7 @@ import {
   SelectValue,
 } from '../components/ui/select';
 import Pagination from '../components/Pagination';
+import { downloadCsv } from '../lib/csv';
 import { toast } from 'sonner';
 import { ScrollText, RefreshCw, Download, Search, Filter, User, Clock, Activity, FileText, CreditCard, Store, Terminal } from 'lucide-react';
 
@@ -117,19 +118,8 @@ export default function SystemLogsPage() {
         return;
       }
       
-      const headers = Object.keys(data[0]);
-      const csvContent = [
-        headers.join(','),
-        ...data.map(row => headers.map(h => `"${row[h] || ''}"`).join(','))
-      ].join('\n');
-      
-      const blob = new Blob([csvContent], { type: 'text/csv' });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `audit_logs_${startDate}_${endDate}.csv`;
-      a.click();
-      
+      downloadCsv(data, `audit_logs_${startDate}_${endDate}.csv`);
+
       toast.success(`Exported ${data.length} records`);
     } catch (error) {
       toast.error('Export failed');

@@ -14,6 +14,7 @@ import bcrypt
 import re
 import json
 import aiofiles
+import asyncio
 import contextvars
 from contextlib import asynccontextmanager
 
@@ -80,7 +81,14 @@ def login_rate_limited(email: str) -> bool:
 
 def record_login_failure(email: str):
     import time
-    _login_failures.setdefault(_rate_limit_key(email), []).append(time.time())
+    now = time.time()
+    # Bound the tracker: prune fully-expired keys once the dict grows large,
+    # so an attacker cycling emails cannot exhaust memory via the login endpoint.
+    if len(_login_failures) > 5000:
+        stale = [k for k, ts in _login_failures.items() if not ts or now - max(ts) > LOGIN_WINDOW_SECONDS]
+        for k in stale:
+            _login_failures.pop(k, None)
+    _login_failures.setdefault(_rate_limit_key(email), []).append(now)
 
 def clear_login_failures(email: str):
     _login_failures.pop(_rate_limit_key(email), None)
@@ -306,11 +314,20 @@ security = HTTPBearer()
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+    # Deactivation must revoke access immediately, not at token expiry:
+    # verify the account still exists and is active on every request.
+    # (Role changes still take effect at next login - documented behavior.)
+    row = await fetch_one("SELECT is_active FROM users WHERE id = :id", {"id": payload.get("user_id")})
+    if not row:
+        raise HTTPException(status_code=401, detail="Account no longer exists")
+    if row.get("is_active") in (0, False):
+        raise HTTPException(status_code=403, detail="Account is deactivated")
+    return payload
 
 def require_roles(*allowed_roles):
     async def role_checker(user: dict = Depends(get_current_user)):
@@ -479,10 +496,19 @@ app = FastAPI(
 )
 api_router = APIRouter(prefix="/api")
 
+# X-Forwarded-For is attacker-controlled unless a trusted proxy appends to it.
+# TRUSTED_PROXY_HOPS=0 (default) ignores XFF entirely and uses the socket peer;
+# set it to the number of trusted proxies in front of the API to use the
+# rightmost trustworthy XFF entry. Prevents rate-limit bypass and audit forgery.
+TRUSTED_PROXY_HOPS = int(os.environ.get("TRUSTED_PROXY_HOPS", "0"))
+
 @app.middleware("http")
 async def capture_client_ip(request, call_next):
-    forwarded = request.headers.get("x-forwarded-for", "")
-    ip = forwarded.split(",")[0].strip() if forwarded else (request.client.host if request.client else "unknown")
+    ip = request.client.host if request.client else "unknown"
+    if TRUSTED_PROXY_HOPS > 0:
+        parts = [p.strip() for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
+        if len(parts) >= TRUSTED_PROXY_HOPS:
+            ip = parts[-TRUSTED_PROXY_HOPS]
     token = _client_ip.set(ip or "unknown")
     try:
         response = await call_next(request)
@@ -609,6 +635,12 @@ async def list_users(search: Optional[str] = None, page: int = 1, page_size: int
 async def update_user_role(user_id: str, role: str, user: dict = Depends(require_roles("SUPER_ADMIN"))):
     if role not in VALID_ROLES:
         raise HTTPException(status_code=400, detail="Invalid role")
+    if user_id == user["user_id"]:
+        raise HTTPException(status_code=400, detail="You cannot change your own role")
+
+    target = await fetch_one("SELECT id FROM users WHERE id = :id", {"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
 
     await update_row("users", {"role": role}, "id = :user_id", {"user_id": user_id})
     await create_audit_log(user["user_id"], user["email"], "UPDATE", "user", user_id, {"role": role})
@@ -625,8 +657,13 @@ async def update_user_status(user_id: str, update: UserStatusUpdate, user: dict 
 
     try:
         await update_row("users", {"is_active": 1 if update.is_active else 0}, "id = :user_id", {"user_id": user_id})
-    except Exception:
-        raise HTTPException(status_code=400, detail="The users table has no is_active column. Run: ALTER TABLE users ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1")
+    except Exception as e:
+        # Only the missing-column case gets the migration hint; anything else
+        # is a real DB failure and must surface, not masquerade as schema advice.
+        if "1054" in str(e) or "unknown column" in str(e).lower():
+            raise HTTPException(status_code=400, detail="The users table has no is_active column. Run migration backend/migrations/001_users_is_active.sql")
+        logger.exception("Failed to update user status")
+        raise HTTPException(status_code=500, detail="Failed to update user status")
 
     await create_audit_log(user["user_id"], user["email"], "UPDATE", "user", user_id, {"is_active": update.is_active})
     return {"message": "User activated" if update.is_active else "User deactivated"}
@@ -721,6 +758,8 @@ async def delete_merchant(merchant_id: str, user: dict = Depends(require_roles("
         )
 
     await delete_row("merchants", "id = :id", {"id": merchant_id})
+    # Remove any Hub mapping too, or its unique key blocks re-linking later
+    await delete_row("hub_merchant_links", "merchant_id = :id", {"id": merchant_id})
     await create_audit_log(user["user_id"], user["email"], "DELETE", "merchant", merchant_id)
     return {"message": "Merchant deleted successfully"}
 
@@ -1211,28 +1250,30 @@ async def get_dashboard_stats(user: dict = Depends(get_current_user)):
         t["created_at"] = str(t["created_at"]) if t["created_at"] else None
         t["amount"] = float(t["amount"]) if t.get("amount") else 0
 
-    # Real weekly transaction aggregates for the last 4 weeks
-    now = datetime.now(timezone.utc)
-    cutoff = (now - timedelta(days=28)).strftime('%Y-%m-%d %H:%M:%S')
+    # Real weekly transaction aggregates for the last 4 weeks.
+    # Buckets are whole calendar days (7 per bucket, ending today) so no
+    # boundary day is ever dropped from the fetched range.
+    today = datetime.now(timezone.utc).date()
+    cutoff_date = today - timedelta(days=27)
     daily = await fetch_all(
         "SELECT DATE(created_at) as day, COUNT(*) as count, COALESCE(SUM(amount), 0) as volume "
         "FROM transactions WHERE created_at >= :cutoff GROUP BY DATE(created_at)",
-        {"cutoff": cutoff}
+        {"cutoff": cutoff_date.strftime('%Y-%m-%d 00:00:00')}
     )
     weekly = []
     for i in range(3, -1, -1):
-        week_end = now - timedelta(days=7 * i)
-        week_start = week_end - timedelta(days=7)
+        week_end_date = today - timedelta(days=7 * i)
+        week_start_date = week_end_date - timedelta(days=6)
         count = 0
         volume = 0.0
         for row in daily:
             day = row["day"]
-            day_dt = datetime(day.year, day.month, day.day, tzinfo=timezone.utc)
-            if week_start < day_dt <= week_end:
+            day_date = day if not hasattr(day, "date") else day.date()
+            if week_start_date <= day_date <= week_end_date:
                 count += row["count"]
                 volume += float(row["volume"] or 0)
         weekly.append({
-            "name": f"{week_start.strftime('%b %d')} - {week_end.strftime('%b %d')}",
+            "name": f"{week_start_date.strftime('%b %d')} - {week_end_date.strftime('%b %d')}",
             "transactions": count,
             "volume": round(volume, 2)
         })
@@ -1287,9 +1328,13 @@ def _overall_hub_status(checks: List[Dict[str, Any]]) -> str:
 @api_router.get("/hub/status")
 async def hub_status(manual: bool = False, user: dict = Depends(get_current_user)):
     correlation_id = hub_client.new_correlation_id()
-    health = await hub_client.hub_health(correlation_id)
-    ready = await hub_client.hub_ready(correlation_id)
-    alerts = await hub_client.hub_alerts(correlation_id)
+    # Independent checks run concurrently so a black-holed Hub costs one
+    # timeout (max ~10s), not the sum of all three.
+    health, ready, alerts = await asyncio.gather(
+        hub_client.hub_health(correlation_id),
+        hub_client.hub_ready(correlation_id),
+        hub_client.hub_alerts(correlation_id),
+    )
 
     checks = [
         {"test": "Hub API /health", **{k: health[k] for k in ("status", "latency_ms", "detail")}},
@@ -1371,8 +1416,10 @@ async def hub_bulk_ping(request: BulkPingRequest, user: dict = Depends(require_r
 
 @api_router.get("/hub/events")
 async def hub_events_view(user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
-    stats = await hub_client.hub_events_stats()
-    undelivered = await hub_client.hub_events_undelivered(limit=50)
+    stats, undelivered = await asyncio.gather(
+        hub_client.hub_events_stats(),
+        hub_client.hub_events_undelivered(limit=50),
+    )
     return {"environment": hub_client.PAYMENT_HUB_ENV, "stats": stats, "undelivered": undelivered}
 
 # ---- persisted Hub mappings (references to canonical records, no duplication) ----

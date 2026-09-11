@@ -12,6 +12,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../components/ui/select';
+import { downloadCsv } from '../lib/csv';
 import { toast } from 'sonner';
 import { BarChart3, Download, RefreshCw, FileSpreadsheet } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, LineChart, Line } from 'recharts';
@@ -96,27 +97,14 @@ export default function ReportsPage() {
       
       const response = await axios.get(`${API}/reports/export?${params}`);
       
-      // Convert to CSV
       const data = response.data.data;
       if (data.length === 0) {
         toast.error('No data to export');
         return;
       }
-      
-      const headers = Object.keys(data[0]);
-      const csvContent = [
-        headers.join(','),
-        ...data.map(row => headers.map(h => `"${row[h] || ''}"`).join(','))
-      ].join('\n');
-      
-      // Download
-      const blob = new Blob([csvContent], { type: 'text/csv' });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `transactions_${startDate}_${endDate}.csv`;
-      a.click();
-      
+
+      downloadCsv(data, `transactions_${startDate}_${endDate}.csv`);
+
       toast.success(`Exported ${data.length} records`);
     } catch (error) {
       toast.error('Export failed');
