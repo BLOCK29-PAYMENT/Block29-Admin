@@ -1303,15 +1303,24 @@ async def get_dashboard_stats(user: dict = Depends(get_current_user)):
 
 import hub as hub_client
 
+# Hub identifiers travel into Hub URL paths - restrict to plain tokens so a
+# crafted value cannot re-point the admin-key request at another Hub endpoint.
+HUB_ID_REGEX = r"^[A-Za-z0-9_\-]{1,64}$"
+
 class HubMerchantLink(BaseModel):
-    hub_merchant_id: str = Field(min_length=1, max_length=64)
+    hub_merchant_id: str = Field(min_length=1, max_length=64, pattern=HUB_ID_REGEX)
 
 class HubTerminalLink(BaseModel):
-    hub_terminal_id: str = Field(min_length=1, max_length=64)
+    hub_terminal_id: str = Field(min_length=1, max_length=64, pattern=HUB_ID_REGEX)
     terminal_serial: Optional[str] = Field(default=None, max_length=64)
 
 class BulkPingRequest(BaseModel):
     profile_ids: List[str] = Field(min_length=1, max_length=50)
+
+def require_hub_id(value: str) -> str:
+    if not hub_client.valid_hub_id(value):
+        raise HTTPException(status_code=400, detail="Invalid Hub identifier")
+    return value
 
 def _overall_hub_status(checks: List[Dict[str, Any]]) -> str:
     statuses = [c["status"] for c in checks]
@@ -1373,6 +1382,8 @@ async def hub_merchant_view(merchant_id: str, user: dict = Depends(get_current_u
     link = await fetch_one("SELECT hub_merchant_id FROM hub_merchant_links WHERE merchant_id = :id", {"id": merchant_id})
     if not link:
         return {"linked": False, "detail": "Merchant is not linked to the Payment Hub yet"}
+    # Stored values predating the identifier allowlist are re-validated on use
+    require_hub_id(link["hub_merchant_id"])
 
     lookup = await hub_client.hub_merchant_lookup(link["hub_merchant_id"])
     routing = None
@@ -1395,6 +1406,7 @@ async def hub_merchant_view(merchant_id: str, user: dict = Depends(get_current_u
 @api_router.post("/hub/profiles/{profile_id}/ping")
 async def hub_ping_profile(profile_id: str, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
     """Real device probe via the Hub (SPIn ConnectionStatus / Valor device info)."""
+    require_hub_id(profile_id)
     correlation_id = hub_client.new_correlation_id()
     result = await hub_client.hub_profile_ping(profile_id, correlation_id)
     state = hub_client.ping_state(result)
@@ -1409,6 +1421,8 @@ async def hub_bulk_ping(request: BulkPingRequest, user: dict = Depends(require_r
     correlation_id = hub_client.new_correlation_id()
     if not hub_client.hub_configured():
         raise HTTPException(status_code=503, detail="Payment Hub is not configured")
+    for pid in request.profile_ids:
+        require_hub_id(pid)
     result = await hub_client.bulk_profile_ping(request.profile_ids, correlation_id)
     await create_audit_log(user["user_id"], user["email"], "TERMINAL_BULK_PING", "hub_profile", None,
                            {"correlation_id": correlation_id, "counts": result["counts"], "pinged": result["pinged"]})

@@ -483,3 +483,41 @@ def test_login_failure_tracker_bounded():
     server.record_login_failure("new@block29.com")
     assert len(server._login_failures) < 6000  # stale keys pruned
     server._login_failures.clear()
+
+
+# ---------------- security-review fix: Hub identifier injection ----------------
+
+def test_hub_link_rejects_path_traversal_identifier(db):
+    db.one_results = [{"id": "m1"}]
+    r = client.put("/api/hub/links/merchants/m1", headers=auth(),
+                   json={"hub_merchant_id": "../../api/metrics/json"})
+    assert r.status_code == 422  # pydantic pattern rejects non-token identifiers
+
+
+def test_hub_link_rejects_query_injection_identifier(db):
+    db.one_results = [{"id": "m1"}]
+    r = client.put("/api/hub/links/merchants/m1", headers=auth(),
+                   json={"hub_merchant_id": "x?limit=99"})
+    assert r.status_code == 422
+
+
+def test_hub_ping_rejects_malformed_profile_id(db):
+    r = client.post("/api/hub/profiles/..%3Fx/ping", headers=auth())
+    assert r.status_code == 400
+
+
+def test_hub_bulk_ping_rejects_malformed_ids(db, monkeypatch):
+    monkeypatch.setattr(hub_module, "PAYMENT_HUB_URL", "http://hub.test")
+    monkeypatch.setattr(hub_module, "PAYMENT_HUB_ADMIN_KEY", "k")
+    r = client.post("/api/hub/profiles/bulk-ping", headers=auth(),
+                    json={"profile_ids": ["good-id", "../escape"]})
+    assert r.status_code == 400
+
+
+def test_hub_path_segments_are_encoded():
+    assert hub_module._seg("../x") == "..%2Fx"
+    assert hub_module._seg("a?b=c") == "a%3Fb%3Dc"
+    assert hub_module.valid_hub_id("HMID-001_x")
+    assert not hub_module.valid_hub_id("../../etc")
+    assert not hub_module.valid_hub_id("a?b")
+    assert not hub_module.valid_hub_id("")

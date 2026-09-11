@@ -36,11 +36,27 @@ No financial operations exist here - diagnostics only.
 """
 import asyncio
 import os
+import re
 import time
 import uuid
+from urllib.parse import quote
 from typing import Any, Dict, List, Optional
 
 import httpx
+
+# Hub identifiers embedded in URL paths must be plain tokens - anything else
+# (/, ?, .., %) could re-point the admin-key request at a different Hub path.
+HUB_ID_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+
+
+def valid_hub_id(value: str) -> bool:
+    return bool(value and HUB_ID_PATTERN.fullmatch(value))
+
+
+def _seg(value: str) -> str:
+    """Percent-encode a caller-supplied path segment (defense in depth on top
+    of endpoint-level validation)."""
+    return quote(str(value), safe="")
 
 PAYMENT_HUB_URL = (os.environ.get("PAYMENT_HUB_URL") or "").rstrip("/")
 PAYMENT_HUB_ADMIN_KEY = os.environ.get("PAYMENT_HUB_ADMIN_KEY") or ""
@@ -150,21 +166,21 @@ async def hub_merchants_list() -> Dict[str, Any]:
 
 async def hub_merchant_lookup(identifier: str) -> Dict[str, Any]:
     """UUID-tolerant lookup: resolves merchants.user_id (UUID) -> hub_mid -> int id."""
-    return await hub_request("GET", f"/api/admin/merchants/{identifier}")
+    return await hub_request("GET", f"/api/admin/merchants/{_seg(identifier)}")
 
 
 async def hub_merchant_terminals(hub_merchant_id: str) -> Dict[str, Any]:
-    return await hub_request("GET", f"/api/v1/admin/merchants/{hub_merchant_id}/terminals")
+    return await hub_request("GET", f"/api/v1/admin/merchants/{_seg(hub_merchant_id)}/terminals")
 
 
 async def hub_profile_ping(profile_id: str, correlation_id: Optional[str] = None) -> Dict[str, Any]:
     """REAL device probe: iPOSpays/Dejavoo SPIn ConnectionStatus or Valor device info."""
-    return await hub_request("POST", f"/api/v1/admin/merchants/profiles/{profile_id}/ping",
+    return await hub_request("POST", f"/api/v1/admin/merchants/profiles/{_seg(profile_id)}/ping",
                              correlation_id=correlation_id, timeout=15)
 
 
 async def hub_payment_path(hub_merchant_id: str) -> Dict[str, Any]:
-    return await hub_request("GET", f"/api/v1/admin/merchants/{hub_merchant_id}/payment-path")
+    return await hub_request("GET", f"/api/v1/admin/merchants/{_seg(hub_merchant_id)}/payment-path")
 
 
 async def hub_events_stats() -> Dict[str, Any]:
