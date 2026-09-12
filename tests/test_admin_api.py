@@ -619,3 +619,34 @@ def test_hub_register_hub_failure_502(db, monkeypatch):
     r = client.post("/api/hub/merchants/m1/register", headers=auth(), json={"platform_id": 999})
     assert r.status_code == 502
     assert not [d for t, d in db.inserts if t == "hub_merchant_links"]
+
+
+# ---------------- startup migrations (auto-applied on deploy) ----------------
+
+@pytest.mark.parametrize("col_present, expect_alter", [(0, True), (1, False)])
+def test_startup_migrations_apply_safely(db, monkeypatch, col_present, expect_alter):
+    executed = []
+
+    async def fake_execute(query, params=None):
+        executed.append(" ".join(query.split()))
+    monkeypatch.setattr(server, "execute_query", fake_execute)
+    db.one_results = [{"c": col_present}]  # INFORMATION_SCHEMA is_active probe
+
+    import asyncio as _asyncio
+    _asyncio.get_event_loop().run_until_complete(server.run_startup_migrations())
+
+    alters = [q for q in executed if q.startswith("ALTER TABLE users")]
+    assert bool(alters) is expect_alter
+    assert sum(1 for q in executed if q.startswith("CREATE TABLE IF NOT EXISTS hub_")) == 2
+    assert any("admin@salonbookin.com" in q for q in executed)  # legacy account disabled
+
+
+def test_startup_migrations_never_block_startup(db, monkeypatch):
+    async def broken_execute(query, params=None):
+        raise RuntimeError("no ALTER privilege")
+    monkeypatch.setattr(server, "execute_query", broken_execute)
+    db.one_results = [{"c": 0}]
+
+    import asyncio as _asyncio
+    # must not raise even when every statement fails
+    _asyncio.get_event_loop().run_until_complete(server.run_startup_migrations())

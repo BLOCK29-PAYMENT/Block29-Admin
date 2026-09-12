@@ -8,7 +8,7 @@ Internal company admin for the Block29 ecosystem:
 
 Manages merchants, TSYS VAR sheet intake, terminal profiles and provisioning status, transactions, reports, admin users/roles, the audit trail, and a live **Payment Hub operations console** (health checks, real terminal pings, go-live readiness, Hub mappings) against the AsterPOS Payment Hub. See `PAYMENT_HUB_ADMIN_API_MAP.md`, `ADMIN_RBAC_MATRIX.md`, and `ADMIN_FINAL_AUDIT.md`.
 
-Run migrations in `backend/migrations/` (001–004, manual, ordered) against the live MySQL before deploying this branch.
+**Migrations:** the safe ones (001 `users.is_active`, 004 Hub link tables, 005 disable legacy admin) apply **automatically at backend startup** on every deploy. The destructive ones (002 drop orphan tables, 003 fake-transaction cleanup) are gated behind flags in `scripts/run-migrations.sh` — run those manually after review. Deployment env template: `backend/.env.example`; secret generation: `scripts/generate-secrets.sh`.
 
 ## Stack
 

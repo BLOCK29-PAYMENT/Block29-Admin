@@ -3,6 +3,11 @@
 # Run from a machine that can reach the MySQL server (the admin host itself).
 # Reads connection settings from backend/.env or the environment.
 #
+# NOTE: 001/004/005 also run AUTOMATICALLY at backend startup on every deploy
+# (server.py run_startup_migrations), so this script is only strictly needed
+# for the gated destructive steps below - or to apply 001/004/005 ahead of a
+# deploy.
+#
 # Behavior:
 #   001 (users.is_active)        - applied automatically if the column is missing
 #   004 (hub link tables)        - applied automatically (CREATE IF NOT EXISTS)

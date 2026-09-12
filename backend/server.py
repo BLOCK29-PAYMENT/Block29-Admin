@@ -479,10 +479,67 @@ def parse_var_sheet_text(text: str) -> Dict[str, Any]:
 
 # ==================== APP SETUP ====================
 
+async def run_startup_migrations():
+    """Idempotent, SAFE migrations applied automatically on every deploy.
+
+    Mirrors backend/migrations/ 001, 004 and 005. The destructive migrations
+    (002 drop orphan tables, 003 fake-transaction cleanup) stay manual via
+    scripts/run-migrations.sh. Each step is independent: a failure is logged
+    loudly but never blocks startup (the app tolerates the pre-migration
+    schema).
+    """
+    # 001: users.is_active
+    try:
+        col = await fetch_one(
+            "SELECT COUNT(*) as c FROM INFORMATION_SCHEMA.COLUMNS "
+            "WHERE TABLE_SCHEMA = :db AND TABLE_NAME = 'users' AND COLUMN_NAME = 'is_active'",
+            {"db": MYSQL_DATABASE})
+        if col is not None and not col["c"]:
+            await execute_query("ALTER TABLE users ADD COLUMN is_active TINYINT(1) NOT NULL DEFAULT 1")
+            logger.info("migration 001: added users.is_active")
+        else:
+            logger.info("migration 001: users.is_active present")
+    except Exception:
+        logger.exception("migration 001 (users.is_active) failed - continuing")
+
+    # 004: Hub link tables
+    try:
+        await execute_query(
+            "CREATE TABLE IF NOT EXISTS hub_merchant_links ("
+            "merchant_id VARCHAR(36) NOT NULL PRIMARY KEY,"
+            "hub_merchant_id VARCHAR(64) NOT NULL,"
+            "environment VARCHAR(16) NOT NULL DEFAULT 'production',"
+            "created_by VARCHAR(36) NOT NULL,"
+            "created_at DATETIME NOT NULL,"
+            "updated_at DATETIME NULL,"
+            "UNIQUE KEY uq_hub_merchant (hub_merchant_id, environment))")
+        await execute_query(
+            "CREATE TABLE IF NOT EXISTS hub_terminal_links ("
+            "terminal_id VARCHAR(36) NOT NULL PRIMARY KEY,"
+            "hub_terminal_id VARCHAR(64) NOT NULL,"
+            "terminal_serial VARCHAR(64) NULL,"
+            "environment VARCHAR(16) NOT NULL DEFAULT 'production',"
+            "created_by VARCHAR(36) NOT NULL,"
+            "created_at DATETIME NOT NULL,"
+            "updated_at DATETIME NULL,"
+            "UNIQUE KEY uq_hub_terminal (hub_terminal_id, environment))")
+        logger.info("migration 004: hub link tables ensured")
+    except Exception:
+        logger.exception("migration 004 (hub link tables) failed - continuing")
+
+    # 005: deactivate the legacy publicly-exposed admin account
+    try:
+        await execute_query("UPDATE users SET is_active = 0 WHERE email = 'admin@salonbookin.com'")
+        logger.info("migration 005: legacy admin@salonbookin.com deactivated (if present)")
+    except Exception:
+        logger.exception("migration 005 (disable legacy admin) failed - continuing")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
-    logger.info("Starting up - creating database tables...")
+    # Startup: apply safe idempotent migrations, then optional admin seeding
+    logger.info("Starting up - running startup migrations...")
+    await run_startup_migrations()
     await create_tables()
     yield
     # Shutdown
