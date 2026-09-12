@@ -38,6 +38,15 @@ jest.mock('../components/ui/dropdown-menu', () => ({
   DropdownMenuSeparator: () => null,
 }));
 
+jest.mock('../components/ui/dialog', () => ({
+  Dialog: ({ open, children }) => (open ? <div>{children}</div> : null),
+  DialogContent: ({ children }) => <div>{children}</div>,
+  DialogHeader: ({ children }) => <div>{children}</div>,
+  DialogTitle: ({ children }) => <div>{children}</div>,
+  DialogDescription: ({ children }) => <div>{children}</div>,
+  DialogFooter: ({ children }) => <div>{children}</div>,
+}));
+
 jest.mock('../components/ui/avatar', () => ({
   Avatar: ({ children }) => <div>{children}</div>,
   AvatarFallback: ({ children }) => <div>{children}</div>,
