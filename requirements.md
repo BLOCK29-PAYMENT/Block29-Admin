@@ -1,108 +1,53 @@
-# SalonBookin Admin Platform - Requirements & Architecture
+# Block29 Admin - Requirements & Architecture
 
-## Original Problem Statement
-Build an internal admin platform using Python FastAPI and MongoDB for SalonBookin. The system manages POS software customers, merchant processing through an internal Block29 gateway, and terminal provisioning using Luqra VAR sheets.
+## Purpose
 
-## Features Implemented
+Internal company admin for the Block29 ecosystem: **AsterPOS** (asterpos.com, point of sale), **Chain29** (chain29.com, restaurant chain app), and **Agent9** (agent9.com, voice AI engine). It manages merchant processing operations: merchants, TSYS VAR sheet intake, terminal profiles, transactions, reports, admin users and the audit trail.
 
-### 1. Authentication & Authorization
-- JWT-based authentication
-- Role-based access control (SUPER_ADMIN, OPERATIONS, SUPPORT, RISK, READ_ONLY)
-- Default admin user: admin@salonbookin.com / admin123
+## Current features
 
-### 2. Dashboard
-- Stats overview (merchants, terminals, transactions, pending reviews)
-- Transactions overview chart
-- Merchant status pie chart
-- Recent activity feed
+### Authentication & authorization
+- JWT-based auth; `JWT_SECRET` env var is required (no default).
+- Roles: `SUPER_ADMIN`, `OPERATIONS`, `SUPPORT`, `READ_ONLY`.
+- User creation is SUPER_ADMIN-only (`POST /api/auth/register` requires auth).
+- Optional first-admin seeding via `ADMIN_EMAIL` / `ADMIN_PASSWORD` env vars.
+- Users can be deactivated (`is_active`); deactivated users cannot log in.
 
-### 3. Merchants Management
-- Full CRUD operations
-- Status management (pending, active, suspended)
-- Search and filter functionality
-- Contact information management
+### Dashboard
+- Live counts (merchants, terminals, transactions, pending review).
+- Real last-4-weeks transaction chart, merchant status pie, recent activity.
 
-### 4. VAR Sheet Setup (Luqra)
-- PDF upload functionality
-- Automatic field extraction using regex patterns
-- Editable parsed results with tabs:
-  - Merchant Info
-  - Terminal IDs
-  - Card Types & Networks
-  - Debit/Comments
-- Terminal profile creation from parsed data
-- Draft save and live marking
+### Merchants
+- Full CRUD with search/status filters. Deleting a merchant with terminals or transactions is blocked - suspend instead.
 
-### 5. Terminals & Devices
-- Terminal profile management
-- Provisioning workflow (draft → ready → provisioned → live)
-- Pairing token generation
-- Support for Luqra provider
+### VAR Sheet Setup (TSYS)
+- PDF upload, regex extraction, editable review form (all fields persist), terminal profile creation.
 
-### 6. Transactions & Batches
-- Transaction listing with filters
-- Summary cards (total, volume, approval rate)
-- Merchant and status filtering
+### Terminals & Devices
+- Terminal registry with manual status workflow: draft → provisioned → live.
+- NOTE: status changes are manual tracking only - no processor API is called yet.
 
-### 7. Block29 Internal Gateway
-- Routing architecture visualization
-- Terminal provisioning to processors (Clover, Dejavoo, Valor PayTech)
-- Provisioning history tracking
+### Transactions & Reports
+- Transaction listing with merchant/status/date filters and CSV export.
+- Transaction and batch (daily settlement trend) reports.
 
-### 8. Affiliates & Agents
-- Agent-merchant assignment
-- Commission rate management
-- Multi-level commission support
+### System Logs
+- Audit trail covering login, create/update/delete on merchants/terminals/users, VAR sheet upload/parse/update, terminal provision/mark-live, and exports, with real client IPs. CSV export.
 
-### 9. Users & Roles
-- User management
-- Role assignment and updates
-- Permission-based access control
+## Removed in the 2026-09 cleanup (see ADMIN_AUDIT.md)
 
-### 10. Settings
-- Profile settings
-- Notification preferences
-- Security settings (2FA toggle)
-- System information
+- **Virtual Terminal** - simulated approvals (`random()`), accepted real card data with no gateway. Must not return until a real payment gateway integration exists.
+- **Block29 Gateway page** - provisioning stub that never called any processor.
+- **Affiliates & Agents** - half-built; no agent entity or commission engine.
+- **Settlement report** - fees were hardcoded fiction (2.9% + $0.30).
+- **Settings page** - saved nothing; placebo 2FA toggle.
+- **Pairing tokens** - generated but nothing ever redeemed them.
+- **RISK role** - was never checked by any endpoint.
 
-## Technical Architecture
+## Planned builds (decisions pending)
 
-### Backend (FastAPI + MongoDB)
-- **server.py**: Main application with all endpoints
-- **Collections**: users, merchants, terminal_profiles, varsheet_uploads, pos_terminal_links, block29_provisions, agent_merchants, transactions
-
-### Frontend (React + Tailwind CSS)
-- Dark sidebar navigation
-- Light content area
-- Shadcn UI components
-- Recharts for data visualization
-
-### API Endpoints
-- `/api/auth/*` - Authentication
-- `/api/merchants/*` - Merchant CRUD
-- `/api/admin/varsheet/*` - VAR sheet operations
-- `/api/admin/terminals/*` - Terminal management
-- `/api/block29/*` - Gateway provisioning
-- `/api/agents/*` - Affiliate management
-- `/api/transactions` - Transaction listing
-- `/api/users/*` - User management
-- `/api/dashboard/stats` - Dashboard statistics
-
-## Design Theme
-- Primary Color: Enterprise Blue (#0066CC)
-- Sidebar: Dark Navy (#0F172A)
-- Content: Light gray background (#F8FAFC)
-- Typography: Manrope (headings), Inter (body), JetBrains Mono (monospace)
-
-## Next Action Items
-1. Implement actual PDF parsing with more advanced extraction (OCR if needed)
-2. Add real-time notifications using WebSockets
-3. Implement actual payment processor integrations (Clover, Dejavoo, Valor APIs)
-4. Add audit logging for compliance
-5. Implement data export functionality (CSV/Excel)
-6. Add batch transaction processing
-7. Implement email notifications for status changes
-
-## Test Results
-- Backend: 100% (20/20 tests passed)
-- Frontend: 90%+ functional
+1. Real gateway provisioning (Clover / Dejavoo / Valor) with status callbacks.
+2. Real settlement reporting from processor data + per-merchant fee schedules.
+3. Agent/affiliate management with a proper agent entity and commission engine.
+4. Terminal pairing with an actual POS-side redemption endpoint.
+5. Password reset / change-password flow.

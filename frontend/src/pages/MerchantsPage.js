@@ -26,6 +26,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '../components/ui/dropdown-menu';
+import Pagination from '../components/Pagination';
 import { toast } from 'sonner';
 import { Plus, Search, MoreVertical, Edit, Trash2, Store, RefreshCw } from 'lucide-react';
 
@@ -33,6 +34,9 @@ const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 export default function MerchantsPage() {
   const [merchants, setMerchants] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const pageSize = 50;
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -49,17 +53,23 @@ export default function MerchantsPage() {
   });
 
   useEffect(() => {
-    fetchMerchants();
-  }, [statusFilter]);
+    const timer = setTimeout(fetchMerchants, search ? 350 : 0);
+    return () => clearTimeout(timer);
+  }, [statusFilter, search, page]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [statusFilter, search]);
 
   const fetchMerchants = async () => {
     try {
-      const params = new URLSearchParams();
+      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
       if (statusFilter !== 'all') params.append('status', statusFilter);
       if (search) params.append('search', search);
-      
+
       const response = await axios.get(`${API}/merchants?${params}`);
-      setMerchants(response.data);
+      setMerchants(response.data.items);
+      setTotal(response.data.total);
     } catch (error) {
       toast.error('Failed to fetch merchants');
     } finally {
@@ -133,10 +143,7 @@ export default function MerchantsPage() {
     return <span className={`badge ${styles[status] || 'badge-pending'}`}>{status}</span>;
   };
 
-  const filteredMerchants = merchants.filter(m => 
-    m.business_name?.toLowerCase().includes(search.toLowerCase()) ||
-    m.dba?.toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredMerchants = merchants;
 
   return (
     <div className="space-y-6">
@@ -339,6 +346,7 @@ export default function MerchantsPage() {
                   ))}
                 </tbody>
               </table>
+              <Pagination page={page} pageSize={pageSize} total={total} onPageChange={setPage} />
             </div>
           )}
         </CardContent>

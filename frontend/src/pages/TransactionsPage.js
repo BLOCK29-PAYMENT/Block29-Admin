@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import axios from 'axios';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
+import { Label } from '../components/ui/label';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
 import {
   Select,
@@ -10,31 +11,50 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../components/ui/select';
+import Pagination from '../components/Pagination';
+import { downloadCsv } from '../lib/csv';
 import { toast } from 'sonner';
-import { Search, Receipt, RefreshCw, Download, Filter } from 'lucide-react';
+import { Receipt, RefreshCw, Download } from 'lucide-react';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 export default function TransactionsPage() {
   const [transactions, setTransactions] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const pageSize = 50;
+  const [summary, setSummary] = useState({ count: 0, volume: 0, approved: 0 });
   const [merchants, setMerchants] = useState([]);
   const [loading, setLoading] = useState(true);
   const [merchantFilter, setMerchantFilter] = useState('all');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
 
   useEffect(() => {
     fetchTransactions();
+  }, [merchantFilter, statusFilter, startDate, endDate, page]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [merchantFilter, statusFilter, startDate, endDate]);
+
+  useEffect(() => {
     fetchMerchants();
-  }, [merchantFilter, statusFilter]);
+  }, []);
 
   const fetchTransactions = async () => {
     try {
-      const params = new URLSearchParams();
+      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
       if (merchantFilter !== 'all') params.append('merchant_id', merchantFilter);
       if (statusFilter !== 'all') params.append('status', statusFilter);
-      
+      if (startDate) params.append('start_date', startDate);
+      if (endDate) params.append('end_date', endDate + 'T23:59:59');
+
       const response = await axios.get(`${API}/transactions?${params}`);
-      setTransactions(response.data);
+      setTransactions(response.data.items);
+      setTotal(response.data.total);
+      setSummary(response.data.summary);
     } catch (error) {
       toast.error('Failed to fetch transactions');
     } finally {
@@ -42,10 +62,38 @@ export default function TransactionsPage() {
     }
   };
 
+  const handleExport = async () => {
+    try {
+      const params = new URLSearchParams({
+        start_date: startDate || '2000-01-01',
+        end_date: (endDate || new Date().toISOString().split('T')[0]) + 'T23:59:59'
+      });
+      if (merchantFilter !== 'all') params.append('merchant_id', merchantFilter);
+      if (statusFilter !== 'all') params.append('status', statusFilter);
+
+      const response = await axios.get(`${API}/reports/export?${params}`);
+      const data = response.data.data;
+      if (!data || data.length === 0) {
+        toast.error('No data to export');
+        return;
+      }
+
+      downloadCsv(data, `transactions_export_${new Date().toISOString().split('T')[0]}.csv`);
+
+      if (response.data.truncated) {
+        toast.warning(`Exported first 10,000 records - narrow the date range for the full set`);
+      } else {
+        toast.success(`Exported ${data.length} records`);
+      }
+    } catch (error) {
+      toast.error('Export failed');
+    }
+  };
+
   const fetchMerchants = async () => {
     try {
-      const response = await axios.get(`${API}/merchants`);
-      setMerchants(response.data);
+      const response = await axios.get(`${API}/merchants?page_size=500`);
+      setMerchants(response.data.items);
     } catch (error) {
       console.error('Failed to fetch merchants');
     }
@@ -65,19 +113,18 @@ export default function TransactionsPage() {
     return <span className={`badge ${styles[status] || 'badge-pending'}`}>{status}</span>;
   };
 
-  const totalAmount = transactions.reduce((sum, tx) => sum + (tx.amount || 0), 0);
-  const approvedCount = transactions.filter(tx => tx.status === 'approved').length;
+  // Summary comes from the backend over the FULL filtered set, not just this page
 
   return (
     <div className="space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Transactions & Batches</h1>
-          <p className="text-slate-500 mt-1">View and manage transaction history</p>
+          <h1 className="text-2xl font-bold text-slate-900">Transactions</h1>
+          <p className="text-slate-500 mt-1">View and export transaction history</p>
         </div>
-        <Button variant="outline" data-testid="export-btn">
+        <Button variant="outline" onClick={handleExport} data-testid="export-btn">
           <Download size={18} className="mr-2" />
-          Export
+          Export CSV
         </Button>
       </div>
 
@@ -85,21 +132,21 @@ export default function TransactionsPage() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         <Card className="stats-card">
           <CardContent className="pt-5">
-            <p className="overline mb-1">Total Transactions</p>
-            <p className="text-3xl font-bold text-slate-900 tabular-nums">{transactions.length}</p>
+            <p className="overline mb-1">Transactions (filtered)</p>
+            <p className="text-3xl font-bold text-slate-900 tabular-nums">{summary.count}</p>
           </CardContent>
         </Card>
         <Card className="stats-card">
           <CardContent className="pt-5">
-            <p className="overline mb-1">Total Volume</p>
-            <p className="text-3xl font-bold text-slate-900 tabular-nums">${totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2 })}</p>
+            <p className="overline mb-1">Volume (filtered)</p>
+            <p className="text-3xl font-bold text-slate-900 tabular-nums">${summary.volume.toLocaleString('en-US', { minimumFractionDigits: 2 })}</p>
           </CardContent>
         </Card>
         <Card className="stats-card">
           <CardContent className="pt-5">
-            <p className="overline mb-1">Approval Rate</p>
+            <p className="overline mb-1">Approval Rate (filtered)</p>
             <p className="text-3xl font-bold text-emerald-600 tabular-nums">
-              {transactions.length > 0 ? ((approvedCount / transactions.length) * 100).toFixed(1) : 0}%
+              {summary.count > 0 ? ((summary.approved / summary.count) * 100).toFixed(1) : 0}%
             </p>
           </CardContent>
         </Card>
@@ -108,7 +155,27 @@ export default function TransactionsPage() {
       {/* Filters */}
       <Card>
         <CardContent className="pt-6">
-          <div className="flex flex-col sm:flex-row gap-4">
+          <div className="flex flex-col sm:flex-row gap-4 sm:items-end">
+            <div>
+              <Label className="text-xs text-slate-500">Start Date</Label>
+              <Input
+                type="date"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+                className="w-[150px]"
+                data-testid="tx-start-date"
+              />
+            </div>
+            <div>
+              <Label className="text-xs text-slate-500">End Date</Label>
+              <Input
+                type="date"
+                value={endDate}
+                onChange={(e) => setEndDate(e.target.value)}
+                className="w-[150px]"
+                data-testid="tx-end-date"
+              />
+            </div>
             <Select value={merchantFilter} onValueChange={setMerchantFilter}>
               <SelectTrigger className="w-[200px]" data-testid="tx-merchant-filter">
                 <SelectValue placeholder="All Merchants" />
@@ -179,6 +246,7 @@ export default function TransactionsPage() {
                   ))}
                 </tbody>
               </table>
+              <Pagination page={page} pageSize={pageSize} total={total} onPageChange={setPage} />
             </div>
           )}
         </CardContent>

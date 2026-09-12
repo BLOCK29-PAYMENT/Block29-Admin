@@ -7,18 +7,15 @@ import MerchantsPage from "./pages/MerchantsPage";
 import VarSheetPage from "./pages/VarSheetPage";
 import TerminalsPage from "./pages/TerminalsPage";
 import TransactionsPage from "./pages/TransactionsPage";
-import Block29Page from "./pages/Block29Page";
-import AffiliatesPage from "./pages/AffiliatesPage";
+import PaymentHubPage from "./pages/PaymentHubPage";
 import UsersPage from "./pages/UsersPage";
-import SettingsPage from "./pages/SettingsPage";
-import VirtualTerminalPage from "./pages/VirtualTerminalPage";
 import ReportsPage from "./pages/ReportsPage";
 import SystemLogsPage from "./pages/SystemLogsPage";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 
 const ProtectedRoute = ({ children }) => {
   const { user, loading } = useAuth();
-  
+
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
@@ -26,11 +23,11 @@ const ProtectedRoute = ({ children }) => {
       </div>
     );
   }
-  
+
   if (!user) {
     return <Navigate to="/login" replace />;
   }
-  
+
   return children;
 };
 
@@ -50,14 +47,12 @@ function App() {
                     <Route path="/merchants" element={<MerchantsPage />} />
                     <Route path="/varsheet" element={<VarSheetPage />} />
                     <Route path="/terminals" element={<TerminalsPage />} />
-                    <Route path="/virtual-terminal" element={<VirtualTerminalPage />} />
                     <Route path="/transactions" element={<TransactionsPage />} />
+                    <Route path="/hub" element={<PaymentHubPage />} />
                     <Route path="/reports" element={<ReportsPage />} />
-                    <Route path="/block29" element={<Block29Page />} />
-                    <Route path="/affiliates" element={<AffiliatesPage />} />
                     <Route path="/users" element={<UsersPage />} />
                     <Route path="/logs" element={<SystemLogsPage />} />
-                    <Route path="/settings" element={<SettingsPage />} />
+                    <Route path="*" element={<Navigate to="/" replace />} />
                   </Routes>
                 </Layout>
               </ProtectedRoute>

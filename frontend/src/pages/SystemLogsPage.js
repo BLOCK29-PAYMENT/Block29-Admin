@@ -11,6 +11,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../components/ui/select';
+import Pagination from '../components/Pagination';
+import { downloadCsv } from '../lib/csv';
 import { toast } from 'sonner';
 import { ScrollText, RefreshCw, Download, Search, Filter, User, Clock, Activity, FileText, CreditCard, Store, Terminal } from 'lucide-react';
 
@@ -20,12 +22,12 @@ const ACTION_COLORS = {
   CREATE: 'bg-emerald-100 text-emerald-800',
   UPDATE: 'bg-blue-100 text-blue-800',
   DELETE: 'bg-red-100 text-red-800',
-  VIRTUAL_TERMINAL: 'bg-purple-100 text-purple-800',
-  REFUND: 'bg-amber-100 text-amber-800',
   EXPORT: 'bg-slate-100 text-slate-800',
   LOGIN: 'bg-cyan-100 text-cyan-800',
   UPLOAD: 'bg-indigo-100 text-indigo-800',
-  PROVISION: 'bg-orange-100 text-orange-800'
+  PARSE: 'bg-purple-100 text-purple-800',
+  PROVISION: 'bg-orange-100 text-orange-800',
+  MARK_LIVE: 'bg-amber-100 text-amber-800'
 };
 
 const RESOURCE_ICONS = {
@@ -40,6 +42,9 @@ const RESOURCE_ICONS = {
 
 export default function SystemLogsPage() {
   const [logs, setLogs] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const pageSize = 100;
   const [loading, setLoading] = useState(true);
   const [actionTypes, setActionTypes] = useState([]);
   const [resourceTypes, setResourceTypes] = useState([]);
@@ -57,20 +62,24 @@ export default function SystemLogsPage() {
 
   useEffect(() => {
     fetchLogs();
+  }, [page]);
+
+  useEffect(() => {
     fetchFilterOptions();
   }, []);
 
   const fetchLogs = async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ limit: '200' });
+      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
       if (actionFilter !== 'all') params.append('action', actionFilter);
       if (resourceFilter !== 'all') params.append('resource_type', resourceFilter);
       if (startDate) params.append('start_date', startDate);
       if (endDate) params.append('end_date', endDate + 'T23:59:59');
-      
+
       const response = await axios.get(`${API}/logs?${params}`);
-      setLogs(response.data);
+      setLogs(response.data.items);
+      setTotal(response.data.total);
     } catch (error) {
       if (error.response?.status === 403) {
         toast.error('Admin access required');
@@ -89,7 +98,7 @@ export default function SystemLogsPage() {
       setResourceTypes(response.data.resource_types);
     } catch (error) {
       // Use defaults
-      setActionTypes(['CREATE', 'UPDATE', 'DELETE', 'VIRTUAL_TERMINAL', 'REFUND', 'EXPORT', 'LOGIN']);
+      setActionTypes(['CREATE', 'UPDATE', 'DELETE', 'LOGIN', 'UPLOAD', 'PARSE', 'PROVISION', 'MARK_LIVE', 'EXPORT']);
       setResourceTypes(['merchant', 'terminal', 'transaction', 'varsheet', 'user', 'report']);
     }
   };
@@ -109,19 +118,8 @@ export default function SystemLogsPage() {
         return;
       }
       
-      const headers = Object.keys(data[0]);
-      const csvContent = [
-        headers.join(','),
-        ...data.map(row => headers.map(h => `"${row[h] || ''}"`).join(','))
-      ].join('\n');
-      
-      const blob = new Blob([csvContent], { type: 'text/csv' });
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `audit_logs_${startDate}_${endDate}.csv`;
-      a.click();
-      
+      downloadCsv(data, `audit_logs_${startDate}_${endDate}.csv`);
+
       toast.success(`Exported ${data.length} records`);
     } catch (error) {
       toast.error('Export failed');
@@ -163,9 +161,14 @@ export default function SystemLogsPage() {
       .join(', ');
   };
 
-  // Stats
+  // Stats - page-scoped stats are labeled as such in the UI
   const todayLogs = logs.filter(l => l.timestamp?.startsWith(new Date().toISOString().split('T')[0]));
   const uniqueUsers = [...new Set(logs.map(l => l.user_email).filter(Boolean))];
+
+  const applyFilters = () => {
+    if (page === 1) fetchLogs();
+    else setPage(1);
+  };
 
   return (
     <div className="space-y-6">
@@ -186,8 +189,8 @@ export default function SystemLogsPage() {
           <CardContent className="pt-5">
             <div className="flex items-center justify-between">
               <div>
-                <p className="overline mb-1">Total Logs</p>
-                <p className="text-2xl font-bold tabular-nums">{logs.length}</p>
+                <p className="overline mb-1">Total Logs (filtered)</p>
+                <p className="text-2xl font-bold tabular-nums">{total}</p>
               </div>
               <ScrollText className="h-8 w-8 text-slate-300" />
             </div>
@@ -197,7 +200,7 @@ export default function SystemLogsPage() {
           <CardContent className="pt-5">
             <div className="flex items-center justify-between">
               <div>
-                <p className="overline mb-1">Today's Activity</p>
+                <p className="overline mb-1">Today (this page)</p>
                 <p className="text-2xl font-bold tabular-nums">{todayLogs.length}</p>
               </div>
               <Clock className="h-8 w-8 text-slate-300" />
@@ -208,7 +211,7 @@ export default function SystemLogsPage() {
           <CardContent className="pt-5">
             <div className="flex items-center justify-between">
               <div>
-                <p className="overline mb-1">Active Users</p>
+                <p className="overline mb-1">Users (this page)</p>
                 <p className="text-2xl font-bold tabular-nums">{uniqueUsers.length}</p>
               </div>
               <User className="h-8 w-8 text-slate-300" />
@@ -237,7 +240,7 @@ export default function SystemLogsPage() {
               <div className="relative">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
                 <Input
-                  placeholder="Search logs..."
+                  placeholder="Filter loaded page..."
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   className="pl-10"
@@ -291,7 +294,7 @@ export default function SystemLogsPage() {
                 </SelectContent>
               </Select>
             </div>
-            <Button onClick={fetchLogs} disabled={loading} data-testid="apply-filters-btn">
+            <Button onClick={applyFilters} disabled={loading} data-testid="apply-filters-btn">
               {loading ? <RefreshCw className="animate-spin" size={16} /> : <Filter size={16} />}
             </Button>
           </div>
@@ -356,6 +359,7 @@ export default function SystemLogsPage() {
                   ))}
                 </tbody>
               </table>
+              <Pagination page={page} pageSize={pageSize} total={total} onPageChange={setPage} />
             </div>
           )}
         </CardContent>

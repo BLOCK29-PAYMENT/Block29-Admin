@@ -20,6 +20,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '../components/ui/select';
+import Pagination from '../components/Pagination';
 import { toast } from 'sonner';
 import { Plus, UserCog, Shield, RefreshCw, Search, Mail } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
@@ -30,12 +31,14 @@ const ROLES = [
   { value: 'SUPER_ADMIN', label: 'Super Admin', description: 'Full system access', color: 'badge-error' },
   { value: 'OPERATIONS', label: 'Operations', description: 'VAR sheets, terminals, provisioning', color: 'badge-info' },
   { value: 'SUPPORT', label: 'Support', description: 'View data, transactions', color: 'badge-success' },
-  { value: 'RISK', label: 'Risk', description: 'Compliance and risk management', color: 'badge-warning' },
   { value: 'READ_ONLY', label: 'Read Only', description: 'View only access', color: 'badge-pending' }
 ];
 
 export default function UsersPage() {
   const [users, setUsers] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const pageSize = 50;
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -48,15 +51,22 @@ export default function UsersPage() {
   const { user: currentUser, hasRole } = useAuth();
 
   useEffect(() => {
-    fetchUsers();
-  }, []);
+    const timer = setTimeout(fetchUsers, search ? 350 : 0);
+    return () => clearTimeout(timer);
+  }, [search, page]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [search]);
 
   const fetchUsers = async () => {
     try {
-      const response = await axios.get(`${API}/users`);
-      setUsers(response.data);
+      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+      if (search) params.append('search', search);
+      const response = await axios.get(`${API}/users?${params}`);
+      setUsers(response.data.items);
+      setTotal(response.data.total);
     } catch (error) {
-      // If not authorized, show current user only
       if (error.response?.status === 403) {
         toast.error('Insufficient permissions to view all users');
       }
@@ -88,15 +98,22 @@ export default function UsersPage() {
     }
   };
 
+  const handleStatusChange = async (userId, isActive) => {
+    try {
+      await axios.put(`${API}/users/${userId}/status`, { is_active: isActive });
+      toast.success(isActive ? 'User activated' : 'User deactivated');
+      fetchUsers();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to update status');
+    }
+  };
+
   const getRoleBadge = (role) => {
     const roleInfo = ROLES.find(r => r.value === role);
     return <span className={`badge ${roleInfo?.color || 'badge-pending'}`}>{roleInfo?.label || role}</span>;
   };
 
-  const filteredUsers = users.filter(u => 
-    u.name?.toLowerCase().includes(search.toLowerCase()) ||
-    u.email?.toLowerCase().includes(search.toLowerCase())
-  );
+  const filteredUsers = users;
 
   const isSuperAdmin = hasRole('SUPER_ADMIN');
 
@@ -187,7 +204,7 @@ export default function UsersPage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             {ROLES.map((role) => (
               <div key={role.value} className="p-3 bg-slate-50 rounded-lg">
                 <div className="flex items-center gap-2 mb-1">
@@ -243,6 +260,7 @@ export default function UsersPage() {
                     <th>Name</th>
                     <th>Email</th>
                     <th>Role</th>
+                    <th>Status</th>
                     <th>Created</th>
                     {isSuperAdmin && <th>Actions</th>}
                   </tr>
@@ -263,25 +281,41 @@ export default function UsersPage() {
                         </div>
                       </td>
                       <td>{getRoleBadge(user.role)}</td>
+                      <td>
+                        <span className={`badge ${user.is_active === 0 ? 'badge-error' : 'badge-success'}`}>
+                          {user.is_active === 0 ? 'Inactive' : 'Active'}
+                        </span>
+                      </td>
                       <td className="text-slate-500 text-sm">
                         {new Date(user.created_at).toLocaleDateString()}
                       </td>
                       {isSuperAdmin && (
                         <td>
                           {user.id !== currentUser?.id && (
-                            <Select 
-                              value={user.role} 
-                              onValueChange={(v) => handleRoleChange(user.id, v)}
-                            >
-                              <SelectTrigger className="w-[140px]" data-testid={`role-select-${user.id}`}>
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                {ROLES.map((r) => (
-                                  <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
+                            <div className="flex items-center gap-2">
+                              <Select
+                                value={user.role}
+                                onValueChange={(v) => handleRoleChange(user.id, v)}
+                              >
+                                <SelectTrigger className="w-[140px]" data-testid={`role-select-${user.id}`}>
+                                  <SelectValue />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {ROLES.map((r) => (
+                                    <SelectItem key={r.value} value={r.value}>{r.label}</SelectItem>
+                                  ))}
+                                </SelectContent>
+                              </Select>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                className={user.is_active === 0 ? 'text-emerald-600' : 'text-red-600'}
+                                onClick={() => handleStatusChange(user.id, user.is_active === 0)}
+                                data-testid={`status-toggle-${user.id}`}
+                              >
+                                {user.is_active === 0 ? 'Activate' : 'Deactivate'}
+                              </Button>
+                            </div>
                           )}
                         </td>
                       )}
@@ -289,6 +323,7 @@ export default function UsersPage() {
                   ))}
                 </tbody>
               </table>
+              <Pagination page={page} pageSize={pageSize} total={total} onPageChange={setPage} />
             </div>
           )}
         </CardContent>

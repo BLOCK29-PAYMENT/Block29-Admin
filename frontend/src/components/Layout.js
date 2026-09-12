@@ -7,16 +7,12 @@ import {
   FileText,
   Monitor,
   Receipt,
-  Zap,
-  Users,
+  Radio,
   UserCog,
-  Settings,
   LogOut,
-  Bell,
   ChevronDown,
   Menu,
   X,
-  CreditCard,
   BarChart3,
   ScrollText
 } from 'lucide-react';
@@ -30,21 +26,16 @@ import {
 import { Button } from './ui/button';
 import { Avatar, AvatarFallback } from './ui/avatar';
 
-const LOGO_URL = "https://customer-assets.emergentagent.com/job_stylist-dashboard-5/artifacts/8cebph7y_LOGO%20MARK.jpg";
-
 const navItems = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard },
   { path: '/merchants', label: 'Merchants', icon: Store },
   { path: '/varsheet', label: 'VAR Sheet Setup', icon: FileText, indent: true },
   { path: '/terminals', label: 'Terminals & Devices', icon: Monitor },
-  { path: '/virtual-terminal', label: 'Virtual Terminal', icon: CreditCard },
   { path: '/transactions', label: 'Transactions', icon: Receipt },
+  { path: '/hub', label: 'Payment Hub', icon: Radio },
   { path: '/reports', label: 'Reports', icon: BarChart3 },
-  { path: '/block29', label: 'Block29 Gateway', icon: Zap },
-  { path: '/affiliates', label: 'Affiliates & Agents', icon: Users },
   { path: '/users', label: 'Users & Roles', icon: UserCog },
   { path: '/logs', label: 'System Logs', icon: ScrollText },
-  { path: '/settings', label: 'Settings', icon: Settings },
 ];
 
 export default function Layout({ children }) {
@@ -62,7 +53,7 @@ export default function Layout({ children }) {
     <div className="min-h-screen flex bg-slate-50">
       {/* Mobile overlay */}
       {sidebarOpen && (
-        <div 
+        <div
           className="fixed inset-0 bg-black/50 z-40 lg:hidden"
           onClick={() => setSidebarOpen(false)}
         />
@@ -76,12 +67,14 @@ export default function Layout({ children }) {
       `}>
         {/* Logo */}
         <div className="flex items-center gap-3 px-4 py-5 border-b border-slate-700/50">
-          <img src={LOGO_URL} alt="SalonBookin" className="w-10 h-10 rounded-lg object-cover" />
-          <div>
-            <h1 className="font-bold text-lg tracking-tight">SALONBOOKIN</h1>
-            <p className="text-xs text-slate-400">Admin Portal</p>
+          <div className="w-10 h-10 rounded-lg bg-primary flex items-center justify-center font-bold text-white text-sm tracking-tight">
+            B29
           </div>
-          <button 
+          <div>
+            <h1 className="font-bold text-lg tracking-tight">BLOCK29</h1>
+            <p className="text-xs text-slate-400">Company Admin</p>
+          </div>
+          <button
             className="lg:hidden ml-auto text-slate-400 hover:text-white"
             onClick={() => setSidebarOpen(false)}
           >
@@ -111,6 +104,16 @@ export default function Layout({ children }) {
           </ul>
         </nav>
 
+        {/* Managed products */}
+        <div className="px-4 py-3 border-t border-slate-700/50">
+          <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">Manages</p>
+          <div className="flex flex-wrap gap-1.5 text-[11px] text-slate-400">
+            <span className="px-2 py-0.5 rounded bg-slate-700/50">AsterPOS</span>
+            <span className="px-2 py-0.5 rounded bg-slate-700/50">Chain29</span>
+            <span className="px-2 py-0.5 rounded bg-slate-700/50">Agent9</span>
+          </div>
+        </div>
+
         {/* User info */}
         <div className="p-4 border-t border-slate-700/50">
           <div className="flex items-center gap-3">
@@ -133,7 +136,7 @@ export default function Layout({ children }) {
         <header className="glass-header">
           <div className="flex items-center justify-between px-4 lg:px-6 py-3">
             <div className="flex items-center gap-4">
-              <button 
+              <button
                 className="lg:hidden p-2 -ml-2 text-slate-600 hover:bg-slate-100 rounded-lg"
                 onClick={() => setSidebarOpen(true)}
                 data-testid="mobile-menu-btn"
@@ -146,11 +149,6 @@ export default function Layout({ children }) {
             </div>
 
             <div className="flex items-center gap-3">
-              <Button variant="ghost" size="icon" className="relative" data-testid="notifications-btn">
-                <Bell size={20} />
-                <span className="absolute top-1 right-1 w-2 h-2 bg-red-500 rounded-full" />
-              </Button>
-
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="ghost" className="flex items-center gap-2" data-testid="user-menu-btn">
@@ -167,11 +165,6 @@ export default function Layout({ children }) {
                     <p className="text-sm font-medium">{user?.name}</p>
                     <p className="text-xs text-slate-500">{user?.email}</p>
                   </div>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem onClick={() => {}}>
-                    <Settings size={16} className="mr-2" />
-                    Settings
-                  </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem onClick={logout} className="text-red-600" data-testid="logout-btn">
                     <LogOut size={16} className="mr-2" />

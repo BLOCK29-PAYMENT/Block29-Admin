@@ -1,19 +1,30 @@
 import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
 import axios from 'axios';
 import { Card, CardContent, CardHeader, CardTitle } from '../components/ui/card';
-import { Store, Monitor, Receipt, TrendingUp, AlertCircle, Clock, CheckCircle } from 'lucide-react';
+import { Store, Monitor, Receipt, TrendingUp, AlertCircle, Clock, CheckCircle, Radio } from 'lucide-react';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 const COLORS = ['#0066CC', '#10B981', '#F59E0B', '#EF4444'];
 
+const HUB_STATUS_STYLES = {
+  ONLINE: 'badge-success',
+  DEGRADED: 'badge-warning',
+  OFFLINE: 'badge-error',
+  UNKNOWN: 'badge-pending',
+  NOT_CONFIGURED: 'badge-pending',
+};
+
 export default function Dashboard() {
   const [stats, setStats] = useState(null);
+  const [hubStatus, setHubStatus] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     fetchStats();
+    fetchHubStatus();
   }, []);
 
   const fetchStats = async () => {
@@ -24,6 +35,15 @@ export default function Dashboard() {
       console.error('Failed to fetch stats:', error);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchHubStatus = async () => {
+    try {
+      const response = await axios.get(`${API}/hub/status`);
+      setHubStatus(response.data);
+    } catch (error) {
+      setHubStatus({ overall: 'UNKNOWN', configured: false });
     }
   };
 
@@ -41,12 +61,7 @@ export default function Dashboard() {
     { name: 'Suspended', value: (stats?.merchants?.total || 0) - (stats?.merchants?.active || 0) - (stats?.merchants?.pending || 0) },
   ].filter(d => d.value > 0);
 
-  const chartData = [
-    { name: 'Week 1', transactions: 45 },
-    { name: 'Week 2', transactions: 52 },
-    { name: 'Week 3', transactions: 38 },
-    { name: 'Week 4', transactions: 65 },
-  ];
+  const chartData = stats?.transactions?.weekly || [];
 
   return (
     <div className="space-y-6">
@@ -106,7 +121,7 @@ export default function Dashboard() {
               <div>
                 <p className="overline mb-1">Transactions</p>
                 <p className="text-3xl font-bold text-slate-900 tabular-nums">{stats?.transactions?.total || 0}</p>
-                <p className="text-sm text-slate-500 mt-1">This month</p>
+                <p className="text-sm text-slate-500 mt-1">All time</p>
               </div>
               <div className="h-12 w-12 rounded-lg bg-amber-100 flex items-center justify-center">
                 <Receipt className="h-6 w-6 text-amber-600" />
@@ -134,15 +149,49 @@ export default function Dashboard() {
         </Card>
       </div>
 
+      {/* Payment Hub summary - live data, links to the Hub console */}
+      <Card>
+        <CardContent className="pt-5">
+          <div className="flex items-center justify-between flex-wrap gap-3">
+            <div className="flex items-center gap-3">
+              <div className="h-10 w-10 rounded-lg bg-indigo-100 flex items-center justify-center">
+                <Radio className="h-5 w-5 text-indigo-600" />
+              </div>
+              <div>
+                <p className="font-semibold text-slate-900">Payment Hub</p>
+                <p className="text-xs text-slate-500">
+                  {hubStatus?.checked_at
+                    ? `Last check: ${new Date(hubStatus.checked_at).toLocaleTimeString()} · env: ${hubStatus.environment}`
+                    : 'Checking...'}
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-4">
+              <span className={`badge ${HUB_STATUS_STYLES[hubStatus?.overall] || 'badge-pending'}`}>
+                {String(hubStatus?.overall || 'UNKNOWN').replace(/_/g, ' ')}
+              </span>
+              <Link to="/hub" className="text-sm font-medium text-primary hover:underline" data-testid="open-hub-link">
+                Open Payment Hub →
+              </Link>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Transaction Chart */}
         <Card className="lg:col-span-2">
           <CardHeader>
-            <CardTitle className="text-lg">Transactions Overview</CardTitle>
+            <CardTitle className="text-lg">Transactions - Last 4 Weeks</CardTitle>
           </CardHeader>
           <CardContent>
             <div className="h-[300px]">
+              {chartData.length === 0 ? (
+                <div className="h-full flex items-center justify-center text-slate-400">
+                  No transactions in the last 4 weeks
+                </div>
+              ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={chartData}>
                   <CartesianGrid strokeDasharray="3 3" stroke="#E2E8F0" />
@@ -158,6 +207,7 @@ export default function Dashboard() {
                   <Bar dataKey="transactions" fill="#0066CC" radius={[4, 4, 0, 0]} />
                 </BarChart>
               </ResponsiveContainer>
+              )}
             </div>
           </CardContent>
         </Card>

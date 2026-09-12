@@ -88,3 +88,12 @@ frontend/node_modules/.cache/default-development/7.pack
 # Environment files
 *.env
 *.env.*
+
+# Environment files - never commit secrets (backend/.env was leaked in history; see rotation checklist)
+.env
+**/.env
+.env.*
+!.env.example
+
+# Test artifacts
+test_reports/

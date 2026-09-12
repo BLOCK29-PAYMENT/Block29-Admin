@@ -15,7 +15,7 @@ import {
 import { Textarea } from '../components/ui/textarea';
 import { Separator } from '../components/ui/separator';
 import { toast } from 'sonner';
-import { Upload, FileText, CheckCircle, AlertCircle, RefreshCw, Save, Zap, Play, MapPin, CreditCard, Network, Building, Phone, Globe } from 'lucide-react';
+import { Upload, FileText, AlertCircle, RefreshCw, Save, Zap, Play, MapPin, CreditCard, Network, Building, Globe } from 'lucide-react';
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -37,8 +37,8 @@ export default function VarSheetPage() {
 
   const fetchMerchants = async () => {
     try {
-      const response = await axios.get(`${API}/merchants`);
-      setMerchants(response.data);
+      const response = await axios.get(`${API}/merchants?page_size=500`);
+      setMerchants(response.data.items);
     } catch (error) {
       console.error('Failed to fetch merchants:', error);
     }
@@ -692,10 +692,6 @@ export default function VarSheetPage() {
                   <Button variant="outline" onClick={handleCreateTerminal} data-testid="provision-terminal-btn">
                     <Zap size={16} className="mr-2" />
                     Create Terminal Profile
-                  </Button>
-                  <Button data-testid="mark-live-btn">
-                    <CheckCircle size={16} className="mr-2" />
-                    Mark Live
                   </Button>
                 </div>
               </Tabs>

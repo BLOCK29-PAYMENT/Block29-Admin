@@ -14,6 +14,8 @@ import bcrypt
 import re
 import json
 import aiofiles
+import asyncio
+import contextvars
 from contextlib import asynccontextmanager
 
 # SQLAlchemy imports
@@ -42,8 +44,10 @@ DATABASE_URL = f"mysql+aiomysql://{MYSQL_USER}:{MYSQL_PASSWORD}@{MYSQL_HOST}:{MY
 engine = create_async_engine(DATABASE_URL, echo=False, pool_pre_ping=True, pool_recycle=3600)
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-# JWT Configuration
-JWT_SECRET = os.environ.get('JWT_SECRET', 'salonbookin-admin-secret-key-2024')
+# JWT Configuration - a signing secret must be provided; refuse to start with a guessable default
+JWT_SECRET = os.environ.get('JWT_SECRET')
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET environment variable is not set. Set a strong random secret before starting the server.")
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRATION_HOURS = 24
 
@@ -54,6 +58,40 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Client IP of the request currently being handled (set by middleware, read by audit logging)
+_client_ip = contextvars.ContextVar("client_ip", default="unknown")
+
+# ==================== LOGIN RATE LIMITING ====================
+# In-memory sliding window per (client_ip, email). Single-instance deployment;
+# move to a shared store if the API is ever scaled horizontally.
+LOGIN_MAX_FAILURES = 5
+LOGIN_WINDOW_SECONDS = 15 * 60
+_login_failures: Dict[str, List[float]] = {}
+
+def _rate_limit_key(email: str) -> str:
+    return f"{_client_ip.get()}|{email.lower()}"
+
+def login_rate_limited(email: str) -> bool:
+    import time
+    now = time.time()
+    attempts = [t for t in _login_failures.get(_rate_limit_key(email), []) if now - t < LOGIN_WINDOW_SECONDS]
+    _login_failures[_rate_limit_key(email)] = attempts
+    return len(attempts) >= LOGIN_MAX_FAILURES
+
+def record_login_failure(email: str):
+    import time
+    now = time.time()
+    # Bound the tracker: prune fully-expired keys once the dict grows large,
+    # so an attacker cycling emails cannot exhaust memory via the login endpoint.
+    if len(_login_failures) > 5000:
+        stale = [k for k, ts in _login_failures.items() if not ts or now - max(ts) > LOGIN_WINDOW_SECONDS]
+        for k in stale:
+            _login_failures.pop(k, None)
+    _login_failures.setdefault(_rate_limit_key(email), []).append(now)
+
+def clear_login_failures(email: str):
+    _login_failures.pop(_rate_limit_key(email), None)
 
 # ==================== DATABASE HELPER ====================
 
@@ -104,12 +142,24 @@ async def delete_row(table: str, where_clause: str, where_params: dict):
     query = f"DELETE FROM {table} WHERE {where_clause}"
     await execute_query(query, where_params)
 
+def clamp_pagination(page: int, page_size: int, max_page_size: int = 200):
+    """Normalize pagination inputs."""
+    return max(1, page), min(max(1, page_size), max_page_size)
+
+async def paginated(base_query: str, count_query: str, params: dict, page: int, page_size: int, order_by: str):
+    """Run a filtered query with a total count and LIMIT/OFFSET. order_by must be a code-owned literal."""
+    total_row = await fetch_one(count_query, params)
+    total = total_row["total"] if total_row else 0
+    offset = (page - 1) * page_size
+    items = await fetch_all(f"{base_query} ORDER BY {order_by} LIMIT {page_size} OFFSET {offset}", params)
+    return items, total
+
 # ==================== MODELS ====================
 
 class UserCreate(BaseModel):
     email: EmailStr
-    password: str
-    name: str
+    password: str = Field(min_length=8, max_length=128)
+    name: str = Field(min_length=1, max_length=120)
     role: str = "READ_ONLY"
 
 class UserLogin(BaseModel):
@@ -124,7 +174,7 @@ class UserResponse(BaseModel):
     created_at: str
 
 class MerchantCreate(BaseModel):
-    business_name: str
+    business_name: str = Field(min_length=1, max_length=255)
     dba: Optional[str] = None
     tax_id: Optional[str] = None
     contact_email: Optional[str] = None
@@ -184,49 +234,46 @@ class TerminalProfileUpdate(BaseModel):
     provisioning_status: Optional[str] = None
 
 class VarSheetParsedData(BaseModel):
+    """Editable review fields for a parsed VAR sheet.
+
+    Must cover every field the VAR Sheet review form exposes - any field
+    missing here is silently dropped on save.
+    """
     merchant_name: Optional[str] = None
-    v_number: Optional[str] = None
     merchant_number: Optional[str] = None
+    v_number_primary: Optional[str] = None
+    v_number_secondary: Optional[str] = None
+    terminal_status: Optional[str] = None
     terminal_number: Optional[str] = None
     bin: Optional[str] = None
+    agent: Optional[str] = None
     chain: Optional[str] = None
     store_number: Optional[str] = None
+    location_number: Optional[str] = None
+    street_address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    postal_code: Optional[str] = None
+    phone: Optional[str] = None
+    country: Optional[str] = None
+    currency_code: Optional[str] = None
+    time_zone: Optional[str] = None
+    time_zone_differential: Optional[str] = None
+    visa_mcc: Optional[str] = None
+    industry_type: Optional[str] = None
+    host_capture_participant: Optional[str] = None
+    edc_primary: Optional[str] = None
+    edc_secondary: Optional[str] = None
     card_types: Optional[List[str]] = None
     networks: Optional[List[str]] = None
     amex_se: Optional[str] = None
     disc_se: Optional[str] = None
     aba: Optional[str] = None
+    reimbursement_att: Optional[str] = None
     raw_comments: Optional[str] = None
 
-class Block29ProvisionRequest(BaseModel):
-    merchant_id: str
-    processor: str
-    terminal_data: Dict[str, Any]
-
-class AgentMerchantCreate(BaseModel):
-    agent_id: str
-    merchant_id: str
-    commission_rate: float
-    level: int = 1
-
-class TransactionCreate(BaseModel):
-    merchant_id: str
-    terminal_id: str
-    amount: float
-    card_type: str
-    status: str = "pending"
-
-class VirtualTerminalTransaction(BaseModel):
-    merchant_id: str
-    transaction_type: str
-    amount: float
-    card_number: str
-    card_expiry: str
-    card_cvv: str
-    cardholder_name: str
-    customer_email: Optional[str] = None
-    customer_phone: Optional[str] = None
-    description: Optional[str] = None
+class UserStatusUpdate(BaseModel):
+    is_active: bool
 
 # ==================== AUDIT LOG HELPER ====================
 
@@ -239,7 +286,7 @@ async def create_audit_log(user_id: str, user_email: str, action: str, resource_
         "resource_type": resource_type,
         "resource_id": resource_id or "",
         "details": json.dumps(details or {}),
-        "ip_address": "0.0.0.0",
+        "ip_address": _client_ip.get(),
         "timestamp": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     }
     await insert_row("audit_logs", log_entry)
@@ -267,11 +314,20 @@ security = HTTPBearer()
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
     try:
         payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return payload
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+    # Deactivation must revoke access immediately, not at token expiry:
+    # verify the account still exists and is active on every request.
+    # (Role changes still take effect at next login - documented behavior.)
+    row = await fetch_one("SELECT is_active FROM users WHERE id = :id", {"id": payload.get("user_id")})
+    if not row:
+        raise HTTPException(status_code=401, detail="Account no longer exists")
+    if row.get("is_active") in (0, False):
+        raise HTTPException(status_code=403, detail="Account is deactivated")
+    return payload
 
 def require_roles(*allowed_roles):
     async def role_checker(user: dict = Depends(get_current_user)):
@@ -279,6 +335,8 @@ def require_roles(*allowed_roles):
             raise HTTPException(status_code=403, detail="Insufficient permissions")
         return user
     return role_checker
+
+VALID_ROLES = ["SUPER_ADMIN", "OPERATIONS", "SUPPORT", "READ_ONLY"]
 
 # ==================== VAR PARSER (TSYS Format) ====================
 
@@ -430,43 +488,74 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Shutting down...")
 
-app = FastAPI(title="SalonBookin Admin API", lifespan=lifespan)
+app = FastAPI(
+    title="Block29 Admin API",
+    description="Internal operations console for the Block29 ecosystem (AsterPOS, Chain29, Agent9): merchants, VAR sheets, terminal tracking, transactions, reports, users, and audit logs.",
+    version="1.1.0",
+    lifespan=lifespan
+)
 api_router = APIRouter(prefix="/api")
 
+# X-Forwarded-For is attacker-controlled unless a trusted proxy appends to it.
+# TRUSTED_PROXY_HOPS=0 (default) ignores XFF entirely and uses the socket peer;
+# set it to the number of trusted proxies in front of the API to use the
+# rightmost trustworthy XFF entry. Prevents rate-limit bypass and audit forgery.
+TRUSTED_PROXY_HOPS = int(os.environ.get("TRUSTED_PROXY_HOPS", "0"))
+
+@app.middleware("http")
+async def capture_client_ip(request, call_next):
+    ip = request.client.host if request.client else "unknown"
+    if TRUSTED_PROXY_HOPS > 0:
+        parts = [p.strip() for p in request.headers.get("x-forwarded-for", "").split(",") if p.strip()]
+        if len(parts) >= TRUSTED_PROXY_HOPS:
+            ip = parts[-TRUSTED_PROXY_HOPS]
+    token = _client_ip.set(ip or "unknown")
+    try:
+        response = await call_next(request)
+    finally:
+        _client_ip.reset(token)
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
 async def create_tables():
-    """Create admin-specific tables if they don't exist (most tables already exist in the database)"""
-    # The database already has most tables with existing schema
-    # We only need to ensure admin-specific tables exist
-    
-    # Check if admin user exists, if not create one
-    admin = await fetch_one("SELECT id FROM users WHERE email = :email", {"email": "admin@salonbookin.com"})
+    """Seed the initial SUPER_ADMIN account, only when explicitly configured via env vars."""
+    admin_email = os.environ.get('ADMIN_EMAIL')
+    admin_password = os.environ.get('ADMIN_PASSWORD')
+    if not admin_email or not admin_password:
+        logger.info("ADMIN_EMAIL/ADMIN_PASSWORD not set - skipping admin seed")
+        return
+
+    admin = await fetch_one("SELECT id FROM users WHERE email = :email", {"email": admin_email})
     if not admin:
         await insert_row("users", {
             "id": str(uuid.uuid4()),
-            "email": "admin@salonbookin.com",
-            "password_hash": hash_password("admin123"),
-            "business_name": "SalonBookin Admin",
-            "phone_number": "",
+            "email": admin_email,
+            "password": hash_password(admin_password),
+            "name": "Block29 Admin",
             "role": "SUPER_ADMIN",
-            "is_active": 1,
-            "failed_login_attempts": 0,
             "created_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
         })
-        logger.info("Default admin user created: admin@salonbookin.com / admin123")
+        logger.info(f"Seeded SUPER_ADMIN account: {admin_email}")
     else:
         logger.info("Admin user already exists")
 
 # ==================== AUTH ENDPOINTS ====================
 
 @api_router.post("/auth/register", response_model=UserResponse)
-async def register(user: UserCreate):
+async def register(user: UserCreate, current_user: dict = Depends(require_roles("SUPER_ADMIN"))):
     existing = await fetch_one("SELECT id FROM users WHERE email = :email", {"email": user.email})
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
-    
+
+    if user.role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+
     user_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    
+
     await insert_row("users", {
         "id": user_id,
         "email": user.email,
@@ -475,16 +564,28 @@ async def register(user: UserCreate):
         "role": user.role,
         "created_at": created_at
     })
-    
+
+    await create_audit_log(current_user["user_id"], current_user["email"], "CREATE", "user", user_id, {"email": user.email, "role": user.role})
     return UserResponse(id=user_id, email=user.email, name=user.name, role=user.role, created_at=created_at)
 
 @api_router.post("/auth/login")
 async def login(credentials: UserLogin):
+    if login_rate_limited(credentials.email):
+        raise HTTPException(status_code=429, detail="Too many failed login attempts. Try again in 15 minutes.")
+
     user = await fetch_one("SELECT * FROM users WHERE email = :email", {"email": credentials.email})
-    if not user or not verify_password(credentials.password, user["password"]):
+    if not user or not user.get("password") or not verify_password(credentials.password, user["password"]):
+        record_login_failure(credentials.email)
+        await create_audit_log("", credentials.email, "LOGIN_FAILED", "user")
         raise HTTPException(status_code=401, detail="Invalid credentials")
-    
+
+    if user.get("is_active") in (0, False):
+        await create_audit_log(user["id"], user["email"], "LOGIN_FAILED", "user", user["id"], {"reason": "deactivated"})
+        raise HTTPException(status_code=403, detail="Account is deactivated")
+
+    clear_login_failures(credentials.email)
     token = create_token(user["id"], user["email"], user["role"])
+    await create_audit_log(user["id"], user["email"], "LOGIN", "user", user["id"])
     return {
         "token": token,
         "user": {
@@ -506,25 +607,82 @@ async def get_me(user: dict = Depends(get_current_user)):
 # ==================== USER MANAGEMENT ====================
 
 @api_router.get("/users")
-async def list_users(user: dict = Depends(require_roles("SUPER_ADMIN"))):
-    users = await fetch_all("SELECT id, email, name, role, created_at FROM users")
+async def list_users(search: Optional[str] = None, page: int = 1, page_size: int = 50, user: dict = Depends(require_roles("SUPER_ADMIN"))):
+    page, page_size = clamp_pagination(page, page_size)
+    where = "FROM users WHERE 1=1"
+    params = {}
+    if search:
+        where += " AND (name LIKE :search OR email LIKE :search)"
+        params["search"] = f"%{search}%"
+
+    users, total = await paginated(
+        f"SELECT * {where}", f"SELECT COUNT(*) as total {where}", params, page, page_size, "created_at DESC"
+    )
+
+    safe = []
     for u in users:
-        u["created_at"] = str(u["created_at"])
-    return users
+        safe.append({
+            "id": u.get("id"),
+            "email": u.get("email"),
+            "name": u.get("name"),
+            "role": u.get("role"),
+            "is_active": 0 if u.get("is_active") in (0, False) else 1,
+            "created_at": str(u.get("created_at")) if u.get("created_at") else None
+        })
+    return {"items": safe, "total": total, "page": page, "page_size": page_size}
 
 @api_router.put("/users/{user_id}/role")
 async def update_user_role(user_id: str, role: str, user: dict = Depends(require_roles("SUPER_ADMIN"))):
-    valid_roles = ["SUPER_ADMIN", "OPERATIONS", "SUPPORT", "RISK", "READ_ONLY"]
-    if role not in valid_roles:
-        raise HTTPException(status_code=400, detail=f"Invalid role")
-    
+    if role not in VALID_ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+    if user_id == user["user_id"]:
+        raise HTTPException(status_code=400, detail="You cannot change your own role")
+
+    target = await fetch_one("SELECT id FROM users WHERE id = :id", {"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
     await update_row("users", {"role": role}, "id = :user_id", {"user_id": user_id})
+    await create_audit_log(user["user_id"], user["email"], "UPDATE", "user", user_id, {"role": role})
     return {"message": "Role updated successfully"}
+
+@api_router.put("/users/{user_id}/status")
+async def update_user_status(user_id: str, update: UserStatusUpdate, user: dict = Depends(require_roles("SUPER_ADMIN"))):
+    if user_id == user["user_id"]:
+        raise HTTPException(status_code=400, detail="You cannot deactivate your own account")
+
+    target = await fetch_one("SELECT id FROM users WHERE id = :id", {"id": user_id})
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    try:
+        await update_row("users", {"is_active": 1 if update.is_active else 0}, "id = :user_id", {"user_id": user_id})
+    except Exception as e:
+        # Only the missing-column case gets the migration hint; anything else
+        # is a real DB failure and must surface, not masquerade as schema advice.
+        if "1054" in str(e) or "unknown column" in str(e).lower():
+            raise HTTPException(status_code=400, detail="The users table has no is_active column. Run migration backend/migrations/001_users_is_active.sql")
+        logger.exception("Failed to update user status")
+        raise HTTPException(status_code=500, detail="Failed to update user status")
+
+    await create_audit_log(user["user_id"], user["email"], "UPDATE", "user", user_id, {"is_active": update.is_active})
+    return {"message": "User activated" if update.is_active else "User deactivated"}
 
 # ==================== MERCHANT ENDPOINTS ====================
 
 @api_router.post("/merchants")
 async def create_merchant(merchant: MerchantCreate, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
+    merchant.business_name = merchant.business_name.strip()
+    if not merchant.business_name:
+        raise HTTPException(status_code=400, detail="Business name is required")
+
+    duplicate = await fetch_one(
+        "SELECT id FROM merchants WHERE LOWER(business_name) = LOWER(:name)",
+        {"name": merchant.business_name}
+    )
+    if duplicate:
+        raise HTTPException(status_code=400, detail="A merchant with this business name already exists")
+
     merchant_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     
@@ -540,29 +698,32 @@ async def create_merchant(merchant: MerchantCreate, user: dict = Depends(require
         "created_at": created_at,
         "created_by": user["user_id"]
     })
-    
+
+    await create_audit_log(user["user_id"], user["email"], "CREATE", "merchant", merchant_id, {"business_name": merchant.business_name})
     return {"id": merchant_id, **merchant.model_dump(), "created_at": created_at}
 
 @api_router.get("/merchants")
-async def list_merchants(status: Optional[str] = None, search: Optional[str] = None, user: dict = Depends(get_current_user)):
-    query = "SELECT * FROM merchants WHERE 1=1"
+async def list_merchants(status: Optional[str] = None, search: Optional[str] = None, page: int = 1, page_size: int = 50, user: dict = Depends(get_current_user)):
+    page, page_size = clamp_pagination(page, page_size, max_page_size=500)
+    where = "FROM merchants WHERE 1=1"
     params = {}
-    
+
     if status:
-        query += " AND status = :status"
+        where += " AND status = :status"
         params["status"] = status
     if search:
-        query += " AND (business_name LIKE :search OR dba LIKE :search)"
+        where += " AND (business_name LIKE :search OR dba LIKE :search)"
         params["search"] = f"%{search}%"
-    
-    query += " ORDER BY created_at DESC"
-    merchants = await fetch_all(query, params)
-    
+
+    merchants, total = await paginated(
+        f"SELECT * {where}", f"SELECT COUNT(*) as total {where}", params, page, page_size, "created_at DESC"
+    )
+
     for m in merchants:
         m["created_at"] = str(m["created_at"]) if m["created_at"] else None
         m["updated_at"] = str(m["updated_at"]) if m.get("updated_at") else None
-    
-    return merchants
+
+    return {"items": merchants, "total": total, "page": page, "page_size": page_size}
 
 @api_router.get("/merchants/{merchant_id}")
 async def get_merchant(merchant_id: str, user: dict = Depends(get_current_user)):
@@ -580,12 +741,26 @@ async def update_merchant(merchant_id: str, update: MerchantUpdate, user: dict =
     
     update_data["updated_at"] = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     await update_row("merchants", update_data, "id = :merchant_id", {"merchant_id": merchant_id})
-    
+
+    await create_audit_log(user["user_id"], user["email"], "UPDATE", "merchant", merchant_id, update_data)
     return await get_merchant(merchant_id, user)
 
 @api_router.delete("/merchants/{merchant_id}")
 async def delete_merchant(merchant_id: str, user: dict = Depends(require_roles("SUPER_ADMIN"))):
+    terminals = await fetch_one("SELECT COUNT(*) as count FROM terminal_profiles WHERE merchant_id = :id", {"id": merchant_id})
+    transactions = await fetch_one("SELECT COUNT(*) as count FROM transactions WHERE merchant_id = :id", {"id": merchant_id})
+    t_count = terminals["count"] if terminals else 0
+    tx_count = transactions["count"] if transactions else 0
+    if t_count or tx_count:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Merchant has {t_count} terminal(s) and {tx_count} transaction(s). Suspend the merchant instead of deleting, or remove its terminals first."
+        )
+
     await delete_row("merchants", "id = :id", {"id": merchant_id})
+    # Remove any Hub mapping too, or its unique key blocks re-linking later
+    await delete_row("hub_merchant_links", "merchant_id = :id", {"id": merchant_id})
+    await create_audit_log(user["user_id"], user["email"], "DELETE", "merchant", merchant_id)
     return {"message": "Merchant deleted successfully"}
 
 # ==================== VAR SHEET ENDPOINTS ====================
@@ -614,7 +789,8 @@ async def upload_varsheet(file: UploadFile = File(...), merchant_id: str = Form(
         "created_at": created_at,
         "created_by": user["user_id"]
     })
-    
+
+    await create_audit_log(user["user_id"], user["email"], "UPLOAD", "varsheet", file_id, {"filename": file.filename, "merchant_id": merchant_id})
     return {"id": file_id, "merchant_id": merchant_id, "filename": file.filename, "parse_status": "pending", "created_at": created_at}
 
 @api_router.post("/admin/varsheet/{varsheet_id}/parse")
@@ -643,7 +819,8 @@ async def parse_varsheet(varsheet_id: str, user: dict = Depends(require_roles("S
         "parse_status": parse_status,
         "parsed_at": parsed_at
     }, "id = :id", {"id": varsheet_id})
-    
+
+    await create_audit_log(user["user_id"], user["email"], "PARSE", "varsheet", varsheet_id, {"parse_status": parse_status})
     return {"id": varsheet_id, "parsed_json": parsed_data, "parse_status": parse_status}
 
 @api_router.get("/admin/varsheet/{varsheet_id}")
@@ -693,7 +870,8 @@ async def update_varsheet_parsed_data(varsheet_id: str, parsed_data: VarSheetPar
         "parsed_json": json.dumps(merged),
         "updated_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     }, "id = :id", {"id": varsheet_id})
-    
+
+    await create_audit_log(user["user_id"], user["email"], "UPDATE", "varsheet", varsheet_id)
     return {"id": varsheet_id, "parsed_json": merged}
 
 # ==================== TERMINAL ENDPOINTS ====================
@@ -715,32 +893,38 @@ async def create_terminal(terminal: TerminalProfileCreate, user: dict = Depends(
     data["networks"] = json.dumps(data.get("networks") or [])
     
     await insert_row("terminal_profiles", data)
-    
+
+    await create_audit_log(user["user_id"], user["email"], "CREATE", "terminal", terminal_id, {"merchant_id": terminal.merchant_id, "terminal_number": terminal.terminal_number})
     data["card_types"] = terminal.card_types
     data["networks"] = terminal.networks
     return data
 
 @api_router.get("/admin/terminals")
-async def list_terminals(merchant_id: Optional[str] = None, provisioning_status: Optional[str] = None, user: dict = Depends(get_current_user)):
-    query = "SELECT * FROM terminal_profiles WHERE 1=1"
+async def list_terminals(merchant_id: Optional[str] = None, provisioning_status: Optional[str] = None, search: Optional[str] = None, page: int = 1, page_size: int = 50, user: dict = Depends(get_current_user)):
+    page, page_size = clamp_pagination(page, page_size)
+    where = "FROM terminal_profiles WHERE 1=1"
     params = {}
-    
+
     if merchant_id:
-        query += " AND merchant_id = :merchant_id"
+        where += " AND merchant_id = :merchant_id"
         params["merchant_id"] = merchant_id
     if provisioning_status:
-        query += " AND provisioning_status = :provisioning_status"
+        where += " AND provisioning_status = :provisioning_status"
         params["provisioning_status"] = provisioning_status
-    
-    query += " ORDER BY created_at DESC"
-    terminals = await fetch_all(query, params)
-    
+    if search:
+        where += " AND (terminal_number LIKE :search OR merchant_number LIKE :search OR v_number LIKE :search)"
+        params["search"] = f"%{search}%"
+
+    terminals, total = await paginated(
+        f"SELECT * {where}", f"SELECT COUNT(*) as total {where}", params, page, page_size, "created_at DESC"
+    )
+
     for t in terminals:
         t["created_at"] = str(t["created_at"]) if t["created_at"] else None
         t["card_types"] = json.loads(t["card_types"]) if t.get("card_types") else []
         t["networks"] = json.loads(t["networks"]) if t.get("networks") else []
-    
-    return terminals
+
+    return {"items": terminals, "total": total, "page": page, "page_size": page_size}
 
 @api_router.get("/admin/terminals/{terminal_id}")
 async def get_terminal(terminal_id: str, user: dict = Depends(get_current_user)):
@@ -765,7 +949,8 @@ async def update_terminal(terminal_id: str, update: TerminalProfileUpdate, user:
     
     update_data["updated_at"] = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
     await update_row("terminal_profiles", update_data, "id = :terminal_id", {"terminal_id": terminal_id})
-    
+
+    await create_audit_log(user["user_id"], user["email"], "UPDATE", "terminal", terminal_id)
     return await get_terminal(terminal_id, user)
 
 @api_router.post("/admin/terminals/{terminal_id}/provision")
@@ -782,272 +967,72 @@ async def provision_terminal(terminal_id: str, user: dict = Depends(require_role
         "provisioned_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
         "provisioned_by": user["user_id"]
     }, "id = :id", {"id": terminal_id})
-    
-    return {"message": "Terminal provisioned successfully", "status": "provisioned"}
 
-@api_router.post("/admin/terminals/{terminal_id}/pair")
-async def generate_pairing_token(terminal_id: str, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
-    terminal = await fetch_one("SELECT id FROM terminal_profiles WHERE id = :id", {"id": terminal_id})
-    if not terminal:
-        raise HTTPException(status_code=404, detail="Terminal not found")
-    
-    pairing_token = str(uuid.uuid4()).upper()[:12]
-    created_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    expires_at = (datetime.now(timezone.utc) + timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
-    
-    await insert_row("pos_terminal_links", {
-        "id": str(uuid.uuid4()),
-        "terminal_profile_id": terminal_id,
-        "pairing_token": pairing_token,
-        "token_status": "active",
-        "created_at": created_at,
-        "expires_at": expires_at
-    })
-    
-    return {"pairing_token": pairing_token, "expires_in": "24 hours"}
+    await create_audit_log(user["user_id"], user["email"], "PROVISION", "terminal", terminal_id)
+    return {"message": "Terminal provisioned successfully", "status": "provisioned"}
 
 @api_router.post("/admin/terminals/{terminal_id}/mark-live")
 async def mark_terminal_live(terminal_id: str, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
+    terminal = await fetch_one("SELECT id FROM terminal_profiles WHERE id = :id", {"id": terminal_id})
+    if not terminal:
+        raise HTTPException(status_code=404, detail="Terminal not found")
+
     await update_row("terminal_profiles", {
         "provisioning_status": "live",
         "live_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
         "live_by": user["user_id"]
     }, "id = :id", {"id": terminal_id})
-    
+
+    await create_audit_log(user["user_id"], user["email"], "MARK_LIVE", "terminal", terminal_id)
     return {"message": "Terminal marked as live", "status": "live"}
-
-# ==================== BLOCK29 GATEWAY ====================
-
-@api_router.post("/block29/provision-terminal")
-async def block29_provision(request: Block29ProvisionRequest, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
-    valid_processors = ["clover", "dejavoo", "valor"]
-    if request.processor.lower() not in valid_processors:
-        raise HTTPException(status_code=400, detail=f"Invalid processor")
-    
-    provision_id = str(uuid.uuid4())
-    await insert_row("block29_provisions", {
-        "id": provision_id,
-        "merchant_id": request.merchant_id,
-        "processor": request.processor.lower(),
-        "terminal_data": json.dumps(request.terminal_data),
-        "status": "submitted",
-        "created_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-        "created_by": user["user_id"]
-    })
-    
-    return {"provision_id": provision_id, "status": "submitted", "processor": request.processor}
-
-@api_router.get("/block29/provisions")
-async def list_block29_provisions(merchant_id: Optional[str] = None, processor: Optional[str] = None, user: dict = Depends(get_current_user)):
-    query = "SELECT * FROM block29_provisions WHERE 1=1"
-    params = {}
-    
-    if merchant_id:
-        query += " AND merchant_id = :merchant_id"
-        params["merchant_id"] = merchant_id
-    if processor:
-        query += " AND processor = :processor"
-        params["processor"] = processor.lower()
-    
-    query += " ORDER BY created_at DESC"
-    provisions = await fetch_all(query, params)
-    
-    for p in provisions:
-        p["created_at"] = str(p["created_at"]) if p["created_at"] else None
-        p["terminal_data"] = json.loads(p["terminal_data"]) if p.get("terminal_data") else {}
-    
-    return provisions
-
-# ==================== AGENT/AFFILIATE ====================
-
-@api_router.post("/agents/merchants")
-async def assign_merchant_to_agent(assignment: AgentMerchantCreate, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
-    merchant = await fetch_one("SELECT id FROM merchants WHERE id = :id", {"id": assignment.merchant_id})
-    if not merchant:
-        raise HTTPException(status_code=404, detail="Merchant not found")
-    
-    assignment_id = str(uuid.uuid4())
-    await insert_row("agent_merchants", {
-        "id": assignment_id,
-        "agent_id": assignment.agent_id,
-        "merchant_id": assignment.merchant_id,
-        "commission_rate": assignment.commission_rate,
-        "level": assignment.level,
-        "created_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-        "created_by": user["user_id"]
-    })
-    
-    return {"id": assignment_id, **assignment.model_dump()}
-
-@api_router.get("/agents/merchants")
-async def list_agent_merchant_assignments(agent_id: Optional[str] = None, user: dict = Depends(get_current_user)):
-    query = "SELECT * FROM agent_merchants WHERE 1=1"
-    params = {}
-    
-    if agent_id:
-        query += " AND agent_id = :agent_id"
-        params["agent_id"] = agent_id
-    
-    assignments = await fetch_all(query, params)
-    for a in assignments:
-        a["created_at"] = str(a["created_at"]) if a["created_at"] else None
-        a["commission_rate"] = float(a["commission_rate"]) if a.get("commission_rate") else 0
-    return assignments
-
-@api_router.get("/agents")
-async def list_agents(user: dict = Depends(get_current_user)):
-    agents = await fetch_all("SELECT id, email, name, role, created_at FROM users")
-    for a in agents:
-        a["created_at"] = str(a["created_at"]) if a["created_at"] else None
-    return agents
 
 # ==================== TRANSACTIONS ====================
 
-@api_router.post("/transactions")
-async def create_transaction(transaction: TransactionCreate, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
-    tx_id = str(uuid.uuid4())
-    await insert_row("transactions", {
-        "id": tx_id,
-        "merchant_id": transaction.merchant_id,
-        "terminal_id": transaction.terminal_id,
-        "amount": transaction.amount,
-        "card_type": transaction.card_type,
-        "status": transaction.status,
-        "created_at": datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    })
-    
-    await create_audit_log(user["user_id"], user["email"], "CREATE", "transaction", tx_id)
-    return {"id": tx_id, **transaction.model_dump()}
-
 @api_router.get("/transactions")
-async def list_transactions(merchant_id: Optional[str] = None, status: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
-    query = "SELECT * FROM transactions WHERE 1=1"
+async def list_transactions(merchant_id: Optional[str] = None, status: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, page: int = 1, page_size: int = 50, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
+    page, page_size = clamp_pagination(page, page_size)
+    where = "FROM transactions WHERE 1=1"
     params = {}
-    
+
     if merchant_id:
-        query += " AND merchant_id = :merchant_id"
+        where += " AND merchant_id = :merchant_id"
         params["merchant_id"] = merchant_id
     if status:
-        query += " AND status = :status"
+        where += " AND status = :status"
         params["status"] = status
     if start_date:
-        query += " AND created_at >= :start_date"
+        where += " AND created_at >= :start_date"
         params["start_date"] = start_date
     if end_date:
-        query += " AND created_at <= :end_date"
+        where += " AND created_at <= :end_date"
         params["end_date"] = end_date
-    
-    query += " ORDER BY created_at DESC LIMIT 1000"
-    transactions = await fetch_all(query, params)
-    
+
+    transactions, total = await paginated(
+        f"SELECT * {where}", f"SELECT COUNT(*) as total {where}", params, page, page_size, "created_at DESC"
+    )
+
+    # Summary over the FULL filtered set (not just the current page), so UI totals are accurate
+    summary_row = await fetch_one(
+        f"SELECT COUNT(*) as count, COALESCE(SUM(amount), 0) as volume, "
+        f"SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) as approved {where}",
+        params
+    )
+
     for t in transactions:
         t["created_at"] = str(t["created_at"]) if t["created_at"] else None
         t["amount"] = float(t["amount"]) if t.get("amount") else 0
-    
-    return transactions
 
-# ==================== VIRTUAL TERMINAL ====================
-
-@api_router.post("/virtual-terminal/process")
-async def process_virtual_terminal(transaction: VirtualTerminalTransaction, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
-    merchant = await fetch_one("SELECT id FROM merchants WHERE id = :id", {"id": transaction.merchant_id})
-    if not merchant:
-        raise HTTPException(status_code=404, detail="Merchant not found")
-    
-    card_last_four = transaction.card_number[-4:] if len(transaction.card_number) >= 4 else "****"
-    card_number = transaction.card_number.replace(" ", "").replace("-", "")
-    
-    if card_number.startswith("4"):
-        card_brand = "VISA"
-    elif card_number[:2] in ["51", "52", "53", "54", "55"]:
-        card_brand = "MasterCard"
-    elif card_number[:2] in ["34", "37"]:
-        card_brand = "AMEX"
-    elif card_number.startswith("6011"):
-        card_brand = "Discover"
-    else:
-        card_brand = "Unknown"
-    
-    import random
-    is_approved = random.random() > 0.1
-    auth_code = str(uuid.uuid4())[:8].upper() if is_approved else None
-    
-    tx_id = str(uuid.uuid4())
-    created_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    
-    await insert_row("transactions", {
-        "id": tx_id,
-        "merchant_id": transaction.merchant_id,
-        "terminal_id": "VIRTUAL",
-        "transaction_type": transaction.transaction_type,
-        "amount": transaction.amount,
-        "card_type": card_brand,
-        "card_last_four": card_last_four,
-        "card_expiry": transaction.card_expiry,
-        "cardholder_name": transaction.cardholder_name,
-        "customer_email": transaction.customer_email,
-        "customer_phone": transaction.customer_phone,
-        "description": transaction.description,
-        "status": "approved" if is_approved else "declined",
-        "auth_code": auth_code,
-        "response_code": "00" if is_approved else "05",
-        "response_message": "APPROVED" if is_approved else "DECLINED - Do Not Honor",
-        "entry_mode": "KEYED",
-        "processed_by": user["user_id"],
-        "created_at": created_at
-    })
-    
-    await create_audit_log(user["user_id"], user["email"], "VIRTUAL_TERMINAL", "transaction", tx_id, {"amount": transaction.amount, "status": "approved" if is_approved else "declined"})
-    
     return {
-        "id": tx_id,
-        "status": "approved" if is_approved else "declined",
-        "amount": transaction.amount,
-        "card_type": card_brand,
-        "card_last_four": card_last_four,
-        "auth_code": auth_code,
-        "response_code": "00" if is_approved else "05",
-        "response_message": "APPROVED" if is_approved else "DECLINED - Do Not Honor",
-        "created_at": created_at
+        "items": transactions,
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+        "summary": {
+            "count": summary_row["count"] if summary_row else 0,
+            "volume": float(summary_row["volume"]) if summary_row and summary_row["volume"] else 0,
+            "approved": int(summary_row["approved"]) if summary_row and summary_row["approved"] else 0
+        }
     }
-
-@api_router.post("/virtual-terminal/refund/{transaction_id}")
-async def process_refund(transaction_id: str, amount: Optional[float] = None, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
-    original_tx = await fetch_one("SELECT * FROM transactions WHERE id = :id", {"id": transaction_id})
-    if not original_tx:
-        raise HTTPException(status_code=404, detail="Original transaction not found")
-    
-    if original_tx["status"] != "approved":
-        raise HTTPException(status_code=400, detail="Can only refund approved transactions")
-    
-    refund_amount = amount if amount else float(original_tx["amount"])
-    if refund_amount > float(original_tx["amount"]):
-        raise HTTPException(status_code=400, detail="Refund amount cannot exceed original amount")
-    
-    refund_id = str(uuid.uuid4())
-    created_at = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-    
-    await insert_row("transactions", {
-        "id": refund_id,
-        "merchant_id": original_tx["merchant_id"],
-        "terminal_id": "VIRTUAL",
-        "transaction_type": "refund",
-        "amount": refund_amount,
-        "card_type": original_tx.get("card_type"),
-        "card_last_four": original_tx.get("card_last_four"),
-        "original_transaction_id": transaction_id,
-        "status": "approved",
-        "auth_code": str(uuid.uuid4())[:8].upper(),
-        "response_code": "00",
-        "response_message": "REFUND APPROVED",
-        "entry_mode": "KEYED",
-        "processed_by": user["user_id"],
-        "created_at": created_at
-    })
-    
-    await create_audit_log(user["user_id"], user["email"], "REFUND", "transaction", refund_id, {"original_tx": transaction_id, "amount": refund_amount})
-    
-    return {"id": refund_id, "status": "approved", "amount": refund_amount, "response_message": "REFUND APPROVED"}
 
 # ==================== REPORTS ====================
 
@@ -1140,67 +1125,28 @@ async def get_batch_report(start_date: str, end_date: str, merchant_id: Optional
             "total_batches": len(batch_list),
             "total_sales": round(sum(b["sales_amount"] for b in batch_list), 2),
             "total_refunds": round(sum(b["refund_amount"] for b in batch_list), 2),
-            "net_settlement": round(sum(b["net_amount"] for b in batch_list), 2)
+            "net_total": round(sum(b["net_amount"] for b in batch_list), 2)
         },
         "batches": batch_list,
         "report_generated": datetime.now(timezone.utc).isoformat()
     }
 
-@api_router.get("/reports/settlement")
-async def get_settlement_report(start_date: str, end_date: str, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
-    transactions = await fetch_all(
-        "SELECT * FROM transactions WHERE created_at >= :start_date AND created_at <= :end_date AND status = 'approved'",
-        {"start_date": start_date, "end_date": end_date}
-    )
-    merchants = await fetch_all("SELECT * FROM merchants")
-    merchant_map = {m["id"]: m for m in merchants}
-    
-    settlements = {}
-    for tx in transactions:
-        mid = tx.get("merchant_id")
-        if mid not in settlements:
-            merchant = merchant_map.get(mid, {})
-            settlements[mid] = {"merchant_id": mid, "merchant_name": merchant.get("business_name", "Unknown"), "transaction_count": 0, "gross_amount": 0, "refund_amount": 0, "net_amount": 0, "fee_amount": 0}
-        
-        amount = float(tx["amount"]) if tx.get("amount") else 0
-        if tx.get("transaction_type") == "refund":
-            settlements[mid]["refund_amount"] += amount
-        else:
-            settlements[mid]["gross_amount"] += amount
-        settlements[mid]["transaction_count"] += 1
-    
-    for s in settlements.values():
-        s["net_amount"] = round(s["gross_amount"] - s["refund_amount"], 2)
-        s["fee_amount"] = round(s["gross_amount"] * 0.029 + (s["transaction_count"] * 0.30), 2)
-        s["payout_amount"] = round(s["net_amount"] - s["fee_amount"], 2)
-        s["gross_amount"] = round(s["gross_amount"], 2)
-        s["refund_amount"] = round(s["refund_amount"], 2)
-    
-    settlement_list = sorted(settlements.values(), key=lambda x: x["net_amount"], reverse=True)
-    
-    return {
-        "summary": {
-            "total_merchants": len(settlement_list),
-            "total_gross": round(sum(s["gross_amount"] for s in settlement_list), 2),
-            "total_fees": round(sum(s["fee_amount"] for s in settlement_list), 2),
-            "total_payout": round(sum(s["payout_amount"] for s in settlement_list), 2)
-        },
-        "settlements": settlement_list,
-        "report_generated": datetime.now(timezone.utc).isoformat()
-    }
-
 @api_router.get("/reports/export")
-async def export_transactions_csv(start_date: str, end_date: str, merchant_id: Optional[str] = None, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
+async def export_transactions_csv(start_date: str, end_date: str, merchant_id: Optional[str] = None, status: Optional[str] = None, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
     query = "SELECT * FROM transactions WHERE created_at >= :start_date AND created_at <= :end_date"
     params = {"start_date": start_date, "end_date": end_date}
-    
+
     if merchant_id:
         query += " AND merchant_id = :merchant_id"
         params["merchant_id"] = merchant_id
+    if status:
+        query += " AND status = :status"
+        params["status"] = status
     
-    query += " ORDER BY created_at DESC"
+    # Bounded export: cap at 10,000 rows to avoid unbounded memory/response size
+    query += " ORDER BY created_at DESC LIMIT 10000"
     transactions = await fetch_all(query, params)
-    
+
     csv_data = []
     for tx in transactions:
         csv_data.append({
@@ -1213,63 +1159,65 @@ async def export_transactions_csv(start_date: str, end_date: str, merchant_id: O
             "Card Last 4": tx.get("card_last_four", "****"),
             "Status": tx.get("status"),
             "Auth Code": tx.get("auth_code", ""),
-            "Entry Mode": tx.get("entry_mode", ""),
-            "Cardholder": tx.get("cardholder_name", "")
+            "Entry Mode": tx.get("entry_mode", "")
         })
-    
+
     await create_audit_log(user["user_id"], user["email"], "EXPORT", "report", None, {"type": "transactions", "count": len(csv_data)})
-    
-    return {"data": csv_data, "count": len(csv_data)}
+
+    return {"data": csv_data, "count": len(csv_data), "truncated": len(csv_data) == 10000}
 
 # ==================== SYSTEM LOGS ====================
 
 @api_router.get("/logs")
-async def get_system_logs(limit: int = 100, action: Optional[str] = None, resource_type: Optional[str] = None, user_id: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, user: dict = Depends(require_roles("SUPER_ADMIN"))):
-    query = "SELECT * FROM audit_logs WHERE 1=1"
+async def get_system_logs(action: Optional[str] = None, resource_type: Optional[str] = None, user_id: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, page: int = 1, page_size: int = 100, user: dict = Depends(require_roles("SUPER_ADMIN"))):
+    page, page_size = clamp_pagination(page, page_size, max_page_size=500)
+    where = "FROM audit_logs WHERE 1=1"
     params = {}
-    
+
     if action:
-        query += " AND action = :action"
+        where += " AND action = :action"
         params["action"] = action
     if resource_type:
-        query += " AND resource_type = :resource_type"
+        where += " AND resource_type = :resource_type"
         params["resource_type"] = resource_type
     if user_id:
-        query += " AND user_id = :filter_user_id"
+        where += " AND user_id = :filter_user_id"
         params["filter_user_id"] = user_id
     if start_date:
-        query += " AND timestamp >= :start_date"
+        where += " AND timestamp >= :start_date"
         params["start_date"] = start_date
     if end_date:
-        query += " AND timestamp <= :end_date"
+        where += " AND timestamp <= :end_date"
         params["end_date"] = end_date
-    
-    query += f" ORDER BY timestamp DESC LIMIT {limit}"
-    logs = await fetch_all(query, params)
-    
+
+    logs, total = await paginated(
+        f"SELECT * {where}", f"SELECT COUNT(*) as total {where}", params, page, page_size, "timestamp DESC"
+    )
+
     for log in logs:
         log["timestamp"] = str(log["timestamp"]) if log["timestamp"] else None
         if log.get("details"):
             log["details"] = json.loads(log["details"]) if isinstance(log["details"], str) else log["details"]
-    
-    return logs
+
+    return {"items": logs, "total": total, "page": page, "page_size": page_size}
 
 @api_router.get("/logs/actions")
 async def get_log_action_types(user: dict = Depends(require_roles("SUPER_ADMIN"))):
     actions = await fetch_all("SELECT DISTINCT action FROM audit_logs")
     resource_types = await fetch_all("SELECT DISTINCT resource_type FROM audit_logs")
     return {
-        "actions": [a["action"] for a in actions] or ["CREATE", "UPDATE", "DELETE", "VIRTUAL_TERMINAL", "REFUND", "EXPORT"],
+        "actions": [a["action"] for a in actions] or ["CREATE", "UPDATE", "DELETE", "LOGIN", "UPLOAD", "PARSE", "PROVISION", "MARK_LIVE", "EXPORT"],
         "resource_types": [r["resource_type"] for r in resource_types] or ["merchant", "terminal", "transaction", "varsheet", "user", "report"]
     }
 
 @api_router.get("/logs/export")
 async def export_audit_logs(start_date: str, end_date: str, user: dict = Depends(require_roles("SUPER_ADMIN"))):
     logs = await fetch_all(
-        "SELECT * FROM audit_logs WHERE timestamp >= :start_date AND timestamp <= :end_date ORDER BY timestamp DESC",
+        "SELECT * FROM audit_logs WHERE timestamp >= :start_date AND timestamp <= :end_date ORDER BY timestamp DESC LIMIT 10000",
         {"start_date": start_date, "end_date": end_date}
     )
-    
+    await create_audit_log(user["user_id"], user["email"], "EXPORT", "report", None, {"type": "audit_logs", "count": len(logs)})
+
     csv_data = []
     for log in logs:
         csv_data.append({
@@ -1296,12 +1244,40 @@ async def get_dashboard_stats(user: dict = Depends(get_current_user)):
     live_terminals = await fetch_one("SELECT COUNT(*) as count FROM terminal_profiles WHERE provisioning_status = 'live'")
     
     total_transactions = await fetch_one("SELECT COUNT(*) as count FROM transactions")
-    
+
     recent_transactions = await fetch_all("SELECT * FROM transactions ORDER BY created_at DESC LIMIT 30")
     for t in recent_transactions:
         t["created_at"] = str(t["created_at"]) if t["created_at"] else None
         t["amount"] = float(t["amount"]) if t.get("amount") else 0
-    
+
+    # Real weekly transaction aggregates for the last 4 weeks.
+    # Buckets are whole calendar days (7 per bucket, ending today) so no
+    # boundary day is ever dropped from the fetched range.
+    today = datetime.now(timezone.utc).date()
+    cutoff_date = today - timedelta(days=27)
+    daily = await fetch_all(
+        "SELECT DATE(created_at) as day, COUNT(*) as count, COALESCE(SUM(amount), 0) as volume "
+        "FROM transactions WHERE created_at >= :cutoff GROUP BY DATE(created_at)",
+        {"cutoff": cutoff_date.strftime('%Y-%m-%d 00:00:00')}
+    )
+    weekly = []
+    for i in range(3, -1, -1):
+        week_end_date = today - timedelta(days=7 * i)
+        week_start_date = week_end_date - timedelta(days=6)
+        count = 0
+        volume = 0.0
+        for row in daily:
+            day = row["day"]
+            day_date = day if not hasattr(day, "date") else day.date()
+            if week_start_date <= day_date <= week_end_date:
+                count += row["count"]
+                volume += float(row["volume"] or 0)
+        weekly.append({
+            "name": f"{week_start_date.strftime('%b %d')} - {week_end_date.strftime('%b %d')}",
+            "transactions": count,
+            "volume": round(volume, 2)
+        })
+
     return {
         "merchants": {
             "total": total_merchants["count"] if total_merchants else 0,
@@ -1314,15 +1290,320 @@ async def get_dashboard_stats(user: dict = Depends(get_current_user)):
         },
         "transactions": {
             "total": total_transactions["count"] if total_transactions else 0,
-            "recent": recent_transactions
+            "recent": recent_transactions,
+            "weekly": weekly
         }
     }
 
+# ==================== PAYMENT HUB OPERATIONS ====================
+# Control-plane only: the admin calls the Payment Hub's LIVE canonical APIs
+# (see hub.py header and PAYMENT_HUB_ADMIN_API_MAP.md). No Hub business logic
+# is reimplemented here; no financial operations exist. Diagnostics are pinned
+# to real Hub/device responses - anything unprovable reports UNKNOWN.
+
+import hub as hub_client
+
+# Hub identifiers travel into Hub URL paths - restrict to plain tokens so a
+# crafted value cannot re-point the admin-key request at another Hub endpoint.
+HUB_ID_REGEX = r"^[A-Za-z0-9_\-]{1,64}$"
+
+class HubMerchantLink(BaseModel):
+    hub_merchant_id: str = Field(min_length=1, max_length=64, pattern=HUB_ID_REGEX)
+
+class HubTerminalLink(BaseModel):
+    hub_terminal_id: str = Field(min_length=1, max_length=64, pattern=HUB_ID_REGEX)
+    terminal_serial: Optional[str] = Field(default=None, max_length=64)
+
+class BulkPingRequest(BaseModel):
+    profile_ids: List[str] = Field(min_length=1, max_length=50)
+
+def require_hub_id(value: str) -> str:
+    if not hub_client.valid_hub_id(value):
+        raise HTTPException(status_code=400, detail="Invalid Hub identifier")
+    return value
+
+def _overall_hub_status(checks: List[Dict[str, Any]]) -> str:
+    statuses = [c["status"] for c in checks]
+    if all(s == "ONLINE" for s in statuses):
+        return "ONLINE"
+    if all(s == "NOT_CONFIGURED" for s in statuses):
+        return "NOT_CONFIGURED"
+    if any(s == "OFFLINE" for s in statuses) and not any(s == "ONLINE" for s in statuses):
+        return "OFFLINE"
+    if any(s in ("OFFLINE", "DEGRADED", "UNKNOWN") for s in statuses) and any(s == "ONLINE" for s in statuses):
+        return "DEGRADED"
+    return "UNKNOWN"
+
+@api_router.get("/hub/status")
+async def hub_status(manual: bool = False, user: dict = Depends(get_current_user)):
+    correlation_id = hub_client.new_correlation_id()
+    # Independent checks run concurrently so a black-holed Hub costs one
+    # timeout (max ~10s), not the sum of all three.
+    health, ready, alerts = await asyncio.gather(
+        hub_client.hub_health(correlation_id),
+        hub_client.hub_ready(correlation_id),
+        hub_client.hub_alerts(correlation_id),
+    )
+
+    checks = [
+        {"test": "Hub API /health", **{k: health[k] for k in ("status", "latency_ms", "detail")}},
+        {"test": "Hub /ready (dependencies)", **{k: ready[k] for k in ("status", "latency_ms", "detail")}},
+        {"test": "Hub metrics/alerts", **{k: alerts[k] for k in ("status", "latency_ms", "detail")}},
+    ]
+
+    # Surface real triggered alerts from the Hub, if any
+    triggered_alerts = None
+    if alerts["status"] == "ONLINE" and isinstance(alerts.get("data"), dict):
+        triggered_alerts = alerts["data"]
+
+    if manual:
+        await create_audit_log(user["user_id"], user["email"], "HUB_HEALTH_CHECK", "hub", None,
+                               {"correlation_id": correlation_id, "overall": _overall_hub_status(checks)})
+
+    return {
+        "configured": hub_client.hub_configured(),
+        "environment": hub_client.PAYMENT_HUB_ENV,
+        "overall": _overall_hub_status(checks),
+        "checks": checks,
+        "dependencies": ready.get("data") if ready["status"] == "ONLINE" else None,
+        "alerts": triggered_alerts,
+        "correlation_id": correlation_id,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+@api_router.get("/hub/merchants/{merchant_id}/hub-view")
+async def hub_merchant_view(merchant_id: str, user: dict = Depends(get_current_user)):
+    """Live Hub view of one ADMIN merchant: Hub record, processor profiles with
+    cached connectivity, terminals, and routing config."""
+    merchant = await fetch_one("SELECT id, business_name FROM merchants WHERE id = :id", {"id": merchant_id})
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+
+    link = await fetch_one("SELECT hub_merchant_id FROM hub_merchant_links WHERE merchant_id = :id", {"id": merchant_id})
+    if not link:
+        return {"linked": False, "detail": "Merchant is not linked to the Payment Hub yet"}
+    # Stored values predating the identifier allowlist are re-validated on use
+    require_hub_id(link["hub_merchant_id"])
+
+    lookup = await hub_client.hub_merchant_lookup(link["hub_merchant_id"])
+    routing = None
+    terminals = None
+    if lookup["status"] == "ONLINE" and isinstance(lookup.get("data"), dict):
+        hub_int_id = lookup["data"].get("id")
+        if hub_int_id is not None:
+            routing = await hub_client.hub_payment_path(str(hub_int_id))
+            terminals = await hub_client.hub_merchant_terminals(str(hub_int_id))
+
+    return {
+        "linked": True,
+        "hub_merchant_id": link["hub_merchant_id"],
+        "environment": hub_client.PAYMENT_HUB_ENV,
+        "lookup": lookup,
+        "routing": routing,
+        "terminals": terminals,
+    }
+
+@api_router.post("/hub/profiles/{profile_id}/ping")
+async def hub_ping_profile(profile_id: str, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
+    """Real device probe via the Hub (SPIn ConnectionStatus / Valor device info)."""
+    require_hub_id(profile_id)
+    correlation_id = hub_client.new_correlation_id()
+    result = await hub_client.hub_profile_ping(profile_id, correlation_id)
+    state = hub_client.ping_state(result)
+    await create_audit_log(user["user_id"], user["email"], "TERMINAL_PING", "hub_profile", profile_id,
+                           {"correlation_id": correlation_id, "state": state,
+                            "latency_ms": result["latency_ms"], "detail": result["detail"]})
+    return {"environment": hub_client.PAYMENT_HUB_ENV, "state": state,
+            "checked_at": datetime.now(timezone.utc).isoformat(), **result}
+
+@api_router.post("/hub/profiles/bulk-ping")
+async def hub_bulk_ping(request: BulkPingRequest, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
+    correlation_id = hub_client.new_correlation_id()
+    if not hub_client.hub_configured():
+        raise HTTPException(status_code=503, detail="Payment Hub is not configured")
+    for pid in request.profile_ids:
+        require_hub_id(pid)
+    result = await hub_client.bulk_profile_ping(request.profile_ids, correlation_id)
+    await create_audit_log(user["user_id"], user["email"], "TERMINAL_BULK_PING", "hub_profile", None,
+                           {"correlation_id": correlation_id, "counts": result["counts"], "pinged": result["pinged"]})
+    return {"environment": hub_client.PAYMENT_HUB_ENV, "correlation_id": correlation_id, **result}
+
+@api_router.get("/hub/events")
+async def hub_events_view(user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
+    stats, undelivered = await asyncio.gather(
+        hub_client.hub_events_stats(),
+        hub_client.hub_events_undelivered(limit=50),
+    )
+    return {"environment": hub_client.PAYMENT_HUB_ENV, "stats": stats, "undelivered": undelivered}
+
+# ---- persisted Hub mappings (references to canonical records, no duplication) ----
+
+@api_router.get("/hub/links")
+async def hub_links_list(user: dict = Depends(get_current_user)):
+    merchants = await fetch_all("SELECT * FROM hub_merchant_links")
+    terminals = await fetch_all("SELECT * FROM hub_terminal_links")
+    for row in merchants + terminals:
+        row["created_at"] = str(row["created_at"]) if row.get("created_at") else None
+        row["updated_at"] = str(row["updated_at"]) if row.get("updated_at") else None
+    return {"merchant_links": merchants, "terminal_links": terminals}
+
+@api_router.put("/hub/links/merchants/{merchant_id}")
+async def hub_link_merchant(merchant_id: str, link: HubMerchantLink, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
+    merchant = await fetch_one("SELECT id FROM merchants WHERE id = :id", {"id": merchant_id})
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+
+    # Verify the identifier against the live Hub before persisting; save is
+    # allowed while the Hub is unreachable, but verification state is reported.
+    verification = await hub_client.hub_merchant_lookup(link.hub_merchant_id)
+    if verification["status"] == "ONLINE" and verification.get("http_status") == 200:
+        verified = True
+    elif verification.get("http_status") == 404:
+        raise HTTPException(status_code=400, detail=f"Hub has no merchant '{link.hub_merchant_id}' (checked live)")
+    else:
+        verified = False
+
+    now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    existing = await fetch_one("SELECT merchant_id FROM hub_merchant_links WHERE merchant_id = :id", {"id": merchant_id})
+    if existing:
+        await update_row("hub_merchant_links",
+                         {"hub_merchant_id": link.hub_merchant_id, "environment": hub_client.PAYMENT_HUB_ENV, "updated_at": now},
+                         "merchant_id = :id", {"id": merchant_id})
+    else:
+        await insert_row("hub_merchant_links", {
+            "merchant_id": merchant_id, "hub_merchant_id": link.hub_merchant_id,
+            "environment": hub_client.PAYMENT_HUB_ENV, "created_by": user["user_id"], "created_at": now})
+
+    await create_audit_log(user["user_id"], user["email"], "MERCHANT_HUB_LINK", "merchant", merchant_id,
+                           {"hub_merchant_id": link.hub_merchant_id, "environment": hub_client.PAYMENT_HUB_ENV,
+                            "verified_against_hub": verified})
+    return {"merchant_id": merchant_id, "hub_merchant_id": link.hub_merchant_id,
+            "environment": hub_client.PAYMENT_HUB_ENV, "verified_against_hub": verified,
+            "verification_detail": verification["detail"]}
+
+@api_router.put("/hub/links/terminals/{terminal_id}")
+async def hub_link_terminal(terminal_id: str, link: HubTerminalLink, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
+    terminal = await fetch_one("SELECT id FROM terminal_profiles WHERE id = :id", {"id": terminal_id})
+    if not terminal:
+        raise HTTPException(status_code=404, detail="Terminal not found")
+
+    now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    existing = await fetch_one("SELECT terminal_id FROM hub_terminal_links WHERE terminal_id = :id", {"id": terminal_id})
+    if existing:
+        await update_row("hub_terminal_links",
+                         {"hub_terminal_id": link.hub_terminal_id, "terminal_serial": link.terminal_serial,
+                          "environment": hub_client.PAYMENT_HUB_ENV, "updated_at": now},
+                         "terminal_id = :id", {"id": terminal_id})
+    else:
+        await insert_row("hub_terminal_links", {
+            "terminal_id": terminal_id, "hub_terminal_id": link.hub_terminal_id,
+            "terminal_serial": link.terminal_serial, "environment": hub_client.PAYMENT_HUB_ENV,
+            "created_by": user["user_id"], "created_at": now})
+
+    await create_audit_log(user["user_id"], user["email"], "TERMINAL_HUB_LINK", "terminal", terminal_id,
+                           {"hub_terminal_id": link.hub_terminal_id, "environment": hub_client.PAYMENT_HUB_ENV})
+    return {"terminal_id": terminal_id, "hub_terminal_id": link.hub_terminal_id, "environment": hub_client.PAYMENT_HUB_ENV}
+
+# ---- readiness (computed from real records + real Hub responses; UNKNOWN stays UNKNOWN) ----
+
+def _readiness_overall(checks: List[Dict[str, str]]) -> str:
+    critical = [c for c in checks if c.get("critical")]
+    if any(c["status"] == "FAIL" for c in critical):
+        return "NOT_READY"
+    if any(c["status"] == "UNKNOWN" for c in critical):
+        return "NOT_READY"  # never mark ready while critical checks are unknown
+    if any(c["status"] in ("WARN", "UNKNOWN", "FAIL") for c in checks):
+        return "DEGRADED"
+    return "READY"
+
+@api_router.get("/hub/merchants/{merchant_id}/readiness")
+async def merchant_go_live_readiness(merchant_id: str, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
+    correlation_id = hub_client.new_correlation_id()
+    checks: List[Dict[str, Any]] = []
+
+    merchant = await fetch_one("SELECT * FROM merchants WHERE id = :id", {"id": merchant_id})
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+    checks.append({"check": "Merchant record", "critical": True,
+                   "status": "PASS" if merchant.get("status") == "active" else "FAIL",
+                   "detail": f"status={merchant.get('status')}"})
+
+    var_ok = await fetch_one(
+        "SELECT COUNT(*) as count FROM varsheet_uploads WHERE merchant_id = :id AND parse_status = 'success'",
+        {"id": merchant_id})
+    checks.append({"check": "VAR data", "critical": False,
+                   "status": "PASS" if var_ok and var_ok["count"] else "WARN",
+                   "detail": f"{var_ok['count'] if var_ok else 0} parsed VAR sheet(s)"})
+
+    terminals = await fetch_all("SELECT id, terminal_number FROM terminal_profiles WHERE merchant_id = :id", {"id": merchant_id})
+    checks.append({"check": "Terminals registered", "critical": True,
+                   "status": "PASS" if terminals else "FAIL",
+                   "detail": f"{len(terminals)} terminal(s) in admin registry"})
+
+    hub_link = await fetch_one("SELECT hub_merchant_id FROM hub_merchant_links WHERE merchant_id = :id", {"id": merchant_id})
+    checks.append({"check": "Hub merchant mapping", "critical": True,
+                   "status": "PASS" if hub_link else "FAIL",
+                   "detail": hub_link["hub_merchant_id"] if hub_link else "not linked"})
+
+    health = await hub_client.hub_health(correlation_id)
+    checks.append({"check": "Hub reachable", "critical": True,
+                   "status": {"ONLINE": "PASS", "OFFLINE": "FAIL"}.get(health["status"], "UNKNOWN"),
+                   "detail": health["detail"] or f"{health['latency_ms']} ms"})
+
+    # Live Hub merchant lookup + real per-profile device pings
+    profiles = []
+    if hub_link and health["status"] == "ONLINE":
+        lookup = await hub_client.hub_merchant_lookup(hub_link["hub_merchant_id"])
+        if lookup["status"] == "ONLINE" and isinstance(lookup.get("data"), dict):
+            checks.append({"check": "Hub merchant record", "critical": True, "status": "PASS",
+                           "detail": f"hub id {lookup['data'].get('id')} / {lookup['data'].get('hub_mid', '')}"})
+            profiles = lookup["data"].get("profiles") or []
+            routing = await hub_client.hub_payment_path(str(lookup["data"].get("id")))
+            checks.append({"check": "Processor route configured", "critical": True,
+                           "status": "PASS" if routing["status"] == "ONLINE" and routing.get("data") else
+                                     ("UNKNOWN" if routing["status"] in ("UNKNOWN", "NOT_CONFIGURED") else "FAIL"),
+                           "detail": routing["detail"] or "payment path present"})
+        elif lookup.get("http_status") == 404:
+            checks.append({"check": "Hub merchant record", "critical": True, "status": "FAIL",
+                           "detail": f"Hub has no merchant '{hub_link['hub_merchant_id']}'"})
+        else:
+            checks.append({"check": "Hub merchant record", "critical": True, "status": "UNKNOWN",
+                           "detail": lookup["detail"]})
+    else:
+        checks.append({"check": "Hub merchant record", "critical": True, "status": "UNKNOWN",
+                       "detail": "not linked" if not hub_link else "hub not reachable"})
+
+    profile_ids = [p.get("id") for p in profiles if p.get("id")]
+    if profile_ids:
+        ping = await hub_client.bulk_profile_ping([str(p) for p in profile_ids[:10]], correlation_id)
+        c = ping["counts"]
+        if c["online"] == len(profile_ids[:10]):
+            p_status = "PASS"
+        elif c["online"]:
+            p_status = "WARN"
+        elif c["offline"]:
+            p_status = "FAIL"
+        else:
+            p_status = "UNKNOWN"
+        checks.append({"check": "Terminal ping (live probe)", "critical": False, "status": p_status,
+                       "detail": f"online {c['online']} / offline {c['offline']} / unknown {c['unknown']}"})
+    else:
+        checks.append({"check": "Terminal ping (live probe)", "critical": False, "status": "UNKNOWN",
+                       "detail": "no Hub processor profiles found"})
+
+    overall = _readiness_overall(checks)
+    await create_audit_log(user["user_id"], user["email"], "READINESS_CHECK", "merchant", merchant_id,
+                           {"correlation_id": correlation_id, "overall": overall})
+    return {"merchant_id": merchant_id, "environment": hub_client.PAYMENT_HUB_ENV,
+            "overall": overall, "checks": checks, "correlation_id": correlation_id,
+            "checked_at": datetime.now(timezone.utc).isoformat()}
+
 # ==================== ROOT ====================
+
 
 @api_router.get("/")
 async def root():
-    return {"message": "SalonBookin Admin API", "version": "1.0.0", "database": "MySQL"}
+    return {"message": "Block29 Admin API", "version": "1.1.0", "database": "MySQL"}
 
 @api_router.get("/health")
 async def health():
@@ -1335,10 +1616,15 @@ async def health():
 # Include router and middleware
 app.include_router(api_router)
 
+# Auth uses Bearer tokens (no cookies), so credentialed CORS is unnecessary.
+# Set CORS_ORIGINS to the admin frontend origin(s) in production instead of '*'.
+_cors_origins = [o.strip() for o in os.environ.get('CORS_ORIGINS', '*').split(',') if o.strip()]
+if _cors_origins == ['*']:
+    logger.warning("CORS_ORIGINS is '*' - set it to the admin frontend origin in production")
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
+    allow_credentials=False,
+    allow_origins=_cors_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
