@@ -76,6 +76,13 @@ export default function PaymentHubPage() {
   const [linkValue, setLinkValue] = useState('');
   const [linkSerial, setLinkSerial] = useState('');
 
+  const [revenue, setRevenue] = useState(null);
+  const [revenueRange, setRevenueRange] = useState('7d');
+  const [registerDialog, setRegisterDialog] = useState(null); // {record}
+  const [platformId, setPlatformId] = useState('');
+  const [registering, setRegistering] = useState(false);
+  const [connectionPackage, setConnectionPackage] = useState(null); // shown once after boarding
+
   const fetchStatus = useCallback(async (manual = false) => {
     setStatusLoading(true);
     try {
@@ -214,6 +221,34 @@ export default function PaymentHubPage() {
     }
   };
 
+  const fetchRevenue = async (range = revenueRange) => {
+    setRevenue({ loading: true });
+    try {
+      const response = await axios.get(`${API}/hub/revenue?range=${range}`);
+      setRevenue(response.data);
+    } catch (error) {
+      setRevenue({ by_merchant: { status: 'UNKNOWN', detail: 'Admin backend request failed' } });
+    }
+  };
+
+  const registerInHub = async () => {
+    if (!registerDialog || !platformId) return;
+    setRegistering(true);
+    try {
+      const response = await axios.post(`${API}/hub/merchants/${registerDialog.record.id}/register`, {
+        platform_id: parseInt(platformId, 10),
+      });
+      setRegisterDialog(null);
+      setConnectionPackage(response.data);
+      toast.success(`Registered in Hub as ${response.data.hub_mid}`);
+      fetchLinksAndMerchants();
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Hub registration failed');
+    } finally {
+      setRegistering(false);
+    }
+  };
+
   const merchantLink = (id) => links.merchant_links.find((l) => l.merchant_id === id);
   const terminalLink = (id) => links.terminal_links.find((l) => l.terminal_id === id);
   const notConfigured = status && !status.configured;
@@ -280,11 +315,91 @@ export default function PaymentHubPage() {
       <Tabs defaultValue="overview">
         <TabsList className="flex-wrap">
           <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="revenue" onClick={() => !revenue && fetchRevenue()}>Revenue (Live)</TabsTrigger>
           <TabsTrigger value="terminals">Merchant Terminals</TabsTrigger>
           <TabsTrigger value="readiness">Go-Live Readiness</TabsTrigger>
           <TabsTrigger value="links">Mappings</TabsTrigger>
           <TabsTrigger value="events" onClick={fetchEvents}>Events</TabsTrigger>
         </TabsList>
+
+        {/* REVENUE (live from Hub) */}
+        <TabsContent value="revenue" className="space-y-6">
+          <Card>
+            <CardHeader>
+              <div className="flex items-center justify-between flex-wrap gap-3">
+                <div>
+                  <CardTitle className="text-base">Payment Volume - Live from Payment Hub</CardTitle>
+                  <CardDescription>Approved terminal sessions across the ecosystem. Real Hub data only.</CardDescription>
+                </div>
+                <Select value={revenueRange} onValueChange={(v) => { setRevenueRange(v); fetchRevenue(v); }}>
+                  <SelectTrigger className="w-[140px]" data-testid="revenue-range"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="1d">Last 24h</SelectItem>
+                    <SelectItem value="7d">Last 7 days</SelectItem>
+                    <SelectItem value="30d">Last 30 days</SelectItem>
+                    <SelectItem value="90d">Last 90 days</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {revenue?.loading ? (
+                <div className="py-10 text-center text-slate-400">Loading from Hub...</div>
+              ) : revenue?.by_merchant?.status === 'ONLINE' ? (
+                <>
+                  <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                    <Card className="stats-card"><CardContent className="pt-5">
+                      <p className="overline mb-1">Gross Volume</p>
+                      <p className="text-2xl font-bold tabular-nums text-emerald-600">
+                        ${(revenue.by_merchant.data.total_volume ?? 0).toLocaleString('en-US', { minimumFractionDigits: 2 })}
+                      </p>
+                    </CardContent></Card>
+                    <Card className="stats-card"><CardContent className="pt-5">
+                      <p className="overline mb-1">Approved Transactions</p>
+                      <p className="text-2xl font-bold tabular-nums">{revenue.by_merchant.data.total_tx_count ?? 0}</p>
+                    </CardContent></Card>
+                    <Card className="stats-card"><CardContent className="pt-5">
+                      <p className="overline mb-1">Merchants w/ Volume</p>
+                      <p className="text-2xl font-bold tabular-nums">{(revenue.by_merchant.data.data || []).length}</p>
+                    </CardContent></Card>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="data-table">
+                      <thead><tr><th>Merchant</th><th>Hub Merchant ID</th><th>Gross Volume</th><th>Transactions</th><th>Avg Ticket</th></tr></thead>
+                      <tbody>
+                        {(revenue.by_merchant.data.data || []).map((row) => (
+                          <tr key={row.merchant_id}>
+                            <td className="font-medium">{row.admin_merchant_name || <span className="text-slate-400">(not linked in admin)</span>}</td>
+                            <td className="font-mono text-sm">{row.merchant_id}</td>
+                            <td className="tabular-nums">${row.gross_volume.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                            <td className="tabular-nums">{row.tx_count}</td>
+                            <td className="tabular-nums">${row.avg_ticket.toLocaleString('en-US', { minimumFractionDigits: 2 })}</td>
+                          </tr>
+                        ))}
+                        {!(revenue.by_merchant.data.data || []).length && (
+                          <tr><td colSpan={5} className="text-center text-slate-400 py-6">No approved volume in this range</td></tr>
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {revenue.by_processor?.status === 'ONLINE' && (
+                    <div>
+                      <p className="font-medium text-sm mb-2">By Processor</p>
+                      <pre className="text-xs bg-slate-50 rounded-lg p-4 overflow-x-auto">{JSON.stringify(revenue.by_processor.data, null, 2)}</pre>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="py-10 text-center text-slate-400">
+                  <StatusBadge status={revenue?.by_merchant?.status || 'UNKNOWN'} />
+                  <p className="mt-2 text-sm">{revenue?.by_merchant?.detail || 'Open this tab to load live revenue'}</p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
 
         {/* OVERVIEW */}
         <TabsContent value="overview" className="space-y-6">
@@ -425,6 +540,20 @@ export default function PaymentHubPage() {
                     </table>
                   </div>
 
+                  {hubView.payment_summary?.status === 'ONLINE' && hubView.payment_summary.data && (
+                    <div>
+                      <p className="font-medium text-sm mb-2">Payment Summary (live, device ids masked by Hub)</p>
+                      <pre className="text-xs bg-slate-50 rounded-lg p-4 overflow-x-auto">{JSON.stringify(hubView.payment_summary.data, null, 2)}</pre>
+                    </div>
+                  )}
+
+                  {hubView.revenue_30d?.status === 'ONLINE' && hubView.revenue_30d.data && (
+                    <div>
+                      <p className="font-medium text-sm mb-2">Revenue - Last 30 Days (live from Hub)</p>
+                      <pre className="text-xs bg-slate-50 rounded-lg p-4 overflow-x-auto">{JSON.stringify(hubView.revenue_30d.data, null, 2)}</pre>
+                    </div>
+                  )}
+
                   {hubView.routing?.status === 'ONLINE' && hubView.routing.data && (
                     <div>
                       <p className="font-medium text-sm mb-2">Routing / Payment Path (live from Hub)</p>
@@ -509,9 +638,16 @@ export default function PaymentHubPage() {
                           <td className="text-sm text-slate-500">{link?.environment || '-'}</td>
                           <td>
                             {canOperate && (
-                              <Button variant="outline" size="sm" onClick={() => { setLinkDialog({ type: 'merchant', record: m }); setLinkValue(link?.hub_merchant_id || ''); }}>
-                                {link ? 'Edit Link' : 'Link to Hub'}
-                              </Button>
+                              <div className="flex gap-2">
+                                {!link && (
+                                  <Button size="sm" onClick={() => { setRegisterDialog({ record: m }); setPlatformId(''); }} data-testid={`create-in-hub-${m.id}`}>
+                                    Create in Hub
+                                  </Button>
+                                )}
+                                <Button variant="outline" size="sm" onClick={() => { setLinkDialog({ type: 'merchant', record: m }); setLinkValue(link?.hub_merchant_id || ''); }}>
+                                  {link ? 'Edit Link' : 'Link Existing'}
+                                </Button>
+                              </div>
                             )}
                           </td>
                         </tr>
@@ -597,6 +733,56 @@ export default function PaymentHubPage() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      {/* Create-in-Hub dialog */}
+      <Dialog open={!!registerDialog} onOpenChange={(open) => !open && setRegisterDialog(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Create "{registerDialog?.record?.business_name}" in Payment Hub</DialogTitle>
+            <DialogDescription>
+              Registers the merchant atomically in the Hub (merchant record + hub_mid + API key) and links it here.
+              VAR sheet fields (MCC, BIN, chain, V-number, card types) are auto-filled from the latest parsed VAR sheet.
+              Environment: {status?.environment || 'unknown'}.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label>Hub Platform ID</Label>
+              <Input type="number" value={platformId} onChange={(e) => setPlatformId(e.target.value)}
+                placeholder="e.g. AsterPOS platform id" className="font-mono" data-testid="platform-id-input" />
+              <p className="text-xs text-slate-500 mt-1">The parent platform merchant id in the Hub (AsterPOS / Chain29 / Agent9).</p>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRegisterDialog(null)}>Cancel</Button>
+            <Button onClick={registerInHub} disabled={!platformId || registering} data-testid="register-in-hub-btn">
+              {registering ? 'Registering...' : 'Register in Hub'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Connection package - shown ONCE, never stored by the admin */}
+      <Dialog open={!!connectionPackage} onOpenChange={(open) => !open && setConnectionPackage(null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Registered: {connectionPackage?.hub_mid}</DialogTitle>
+            <DialogDescription>
+              Copy the connection package now - the Hub API key is shown <strong>once</strong> and is not stored in the admin.
+            </DialogDescription>
+          </DialogHeader>
+          {connectionPackage?.connection && (
+            <pre className="text-xs bg-slate-50 rounded-lg p-4 overflow-x-auto select-all">{JSON.stringify(connectionPackage.connection, null, 2)}</pre>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => {
+              navigator.clipboard.writeText(JSON.stringify(connectionPackage?.connection || {}, null, 2));
+              toast.success('Connection package copied');
+            }}>Copy</Button>
+            <Button onClick={() => setConnectionPackage(null)}>Done</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Link dialog */}
       <Dialog open={!!linkDialog} onOpenChange={(open) => !open && setLinkDialog(null)}>

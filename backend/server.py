@@ -596,6 +596,23 @@ async def login(credentials: UserLogin):
         }
     }
 
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8, max_length=128)
+
+@api_router.post("/auth/change-password")
+async def change_password(request: PasswordChange, user: dict = Depends(get_current_user)):
+    """Self-service password change (requires the current password)."""
+    row = await fetch_one("SELECT password FROM users WHERE id = :id", {"id": user["user_id"]})
+    if not row or not row.get("password") or not verify_password(request.current_password, row["password"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect")
+
+    await update_row("users", {"password": hash_password(request.new_password)},
+                     "id = :id", {"id": user["user_id"]})
+    await create_audit_log(user["user_id"], user["email"], "UPDATE", "user", user["user_id"],
+                           {"password_changed": True})
+    return {"message": "Password changed successfully"}
+
 @api_router.get("/auth/me", response_model=UserResponse)
 async def get_me(user: dict = Depends(get_current_user)):
     user_doc = await fetch_one("SELECT id, email, name, role, created_at FROM users WHERE id = :id", {"id": user["user_id"]})
@@ -1374,7 +1391,7 @@ async def hub_status(manual: bool = False, user: dict = Depends(get_current_user
 @api_router.get("/hub/merchants/{merchant_id}/hub-view")
 async def hub_merchant_view(merchant_id: str, user: dict = Depends(get_current_user)):
     """Live Hub view of one ADMIN merchant: Hub record, processor profiles with
-    cached connectivity, terminals, and routing config."""
+    cached connectivity, terminals, routing config, payment summary, and revenue."""
     merchant = await fetch_one("SELECT id, business_name FROM merchants WHERE id = :id", {"id": merchant_id})
     if not merchant:
         raise HTTPException(status_code=404, detail="Merchant not found")
@@ -1386,13 +1403,16 @@ async def hub_merchant_view(merchant_id: str, user: dict = Depends(get_current_u
     require_hub_id(link["hub_merchant_id"])
 
     lookup = await hub_client.hub_merchant_lookup(link["hub_merchant_id"])
-    routing = None
-    terminals = None
+    routing = terminals = payment_summary = revenue = None
     if lookup["status"] == "ONLINE" and isinstance(lookup.get("data"), dict):
         hub_int_id = lookup["data"].get("id")
         if hub_int_id is not None:
-            routing = await hub_client.hub_payment_path(str(hub_int_id))
-            terminals = await hub_client.hub_merchant_terminals(str(hub_int_id))
+            routing, terminals, payment_summary, revenue = await asyncio.gather(
+                hub_client.hub_payment_path(str(hub_int_id)),
+                hub_client.hub_merchant_terminals(str(hub_int_id)),
+                hub_client.hub_merchant_payment_summary(int(hub_int_id)),
+                hub_client.hub_revenue_by_user("30d", int(hub_int_id)),
+            )
 
     return {
         "linked": True,
@@ -1401,6 +1421,133 @@ async def hub_merchant_view(merchant_id: str, user: dict = Depends(get_current_u
         "lookup": lookup,
         "routing": routing,
         "terminals": terminals,
+        "payment_summary": payment_summary,
+        "revenue_30d": revenue,
+    }
+
+@api_router.get("/hub/revenue")
+async def hub_revenue(range: str = "7d", user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS", "SUPPORT"))):
+    """Live payment volume from the Hub (approved terminal sessions), org-wide.
+    Rows are enriched with admin merchant names via the persisted Hub links."""
+    if range not in hub_client.VALID_REVENUE_RANGES:
+        raise HTTPException(status_code=400, detail=f"range must be one of {', '.join(hub_client.VALID_REVENUE_RANGES)}")
+
+    by_merchant, by_processor = await asyncio.gather(
+        hub_client.hub_revenue_by_merchant(range),
+        hub_client.hub_revenue_by_processor(range),
+    )
+
+    # Best-effort enrichment: map Hub merchant ids back to admin merchant names
+    if by_merchant["status"] == "ONLINE" and isinstance(by_merchant.get("data"), dict):
+        links = await fetch_all("SELECT merchant_id, hub_merchant_id FROM hub_merchant_links")
+        link_map = {l["hub_merchant_id"]: l["merchant_id"] for l in links}
+        admin_ids = [m for m in link_map.values()]
+        names = {}
+        if admin_ids:
+            rows = await fetch_all("SELECT id, business_name FROM merchants")
+            names = {r["id"]: r["business_name"] for r in rows}
+        for row in by_merchant["data"].get("data", []):
+            hub_id = str(row.get("merchant_id"))
+            admin_id = link_map.get(hub_id)
+            row["admin_merchant_id"] = admin_id
+            row["admin_merchant_name"] = names.get(admin_id) if admin_id else None
+
+    return {
+        "environment": hub_client.PAYMENT_HUB_ENV,
+        "range": range,
+        "by_merchant": by_merchant,
+        "by_processor": by_processor,
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+class HubRegisterRequest(BaseModel):
+    platform_id: int = Field(gt=0, description="Parent platform merchant id in the Hub (e.g. AsterPOS platform)")
+    business_type: Optional[str] = Field(default=None, max_length=50)
+
+@api_router.post("/hub/merchants/{merchant_id}/register")
+async def hub_register_merchant(merchant_id: str, request: HubRegisterRequest, user: dict = Depends(require_roles("SUPER_ADMIN", "OPERATIONS"))):
+    """One-click boarding: registers the admin merchant in the Payment Hub
+    (atomic merchant + hub_mid + API key) and persists the mapping.
+
+    The Hub's connection package (including the merchant's Hub API key) is
+    relayed ONCE in the response for the operator to copy - it is never
+    persisted or audit logged here."""
+    merchant = await fetch_one("SELECT * FROM merchants WHERE id = :id", {"id": merchant_id})
+    if not merchant:
+        raise HTTPException(status_code=404, detail="Merchant not found")
+
+    existing = await fetch_one("SELECT hub_merchant_id FROM hub_merchant_links WHERE merchant_id = :id", {"id": merchant_id})
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Merchant is already linked to Hub record '{existing['hub_merchant_id']}'")
+
+    if not hub_client.hub_configured():
+        raise HTTPException(status_code=503, detail="Payment Hub is not configured")
+
+    # Auto-fill VAR sheet fields from the latest successfully parsed VAR sheet
+    var_fields = {}
+    varsheet = await fetch_one(
+        "SELECT parsed_json FROM varsheet_uploads WHERE merchant_id = :id AND parse_status = 'success' ORDER BY created_at DESC LIMIT 1",
+        {"id": merchant_id})
+    if varsheet and varsheet.get("parsed_json"):
+        parsed = json.loads(varsheet["parsed_json"]) if isinstance(varsheet["parsed_json"], str) else varsheet["parsed_json"]
+        var_fields = {
+            "mcc": parsed.get("visa_mcc"),
+            "card_types_accepted": parsed.get("card_types"),
+            "store_number": parsed.get("store_number"),
+            "bin_number": parsed.get("bin"),
+            "chain_number": parsed.get("chain"),
+            "v_number": parsed.get("v_number_primary"),
+            "city": parsed.get("city"),
+            "state": parsed.get("state"),
+            "postal_code": parsed.get("postal_code"),
+        }
+
+    payload = {
+        "platform_id": request.platform_id,
+        "user_id": merchant_id,  # canonical external reference: the admin merchant UUID
+        "business_name": merchant["business_name"],
+        "business_type": request.business_type,
+        "contact_email": merchant.get("contact_email"),
+        "contact_phone": merchant.get("contact_phone"),
+        "address": merchant.get("address"),
+        "profiles": [],
+        **{k: v for k, v in var_fields.items() if v},
+    }
+    payload = {k: v for k, v in payload.items() if v is not None}
+
+    correlation_id = hub_client.new_correlation_id()
+    result = await hub_client.hub_merchant_register(payload, correlation_id)
+
+    if result["status"] != "ONLINE" or not isinstance(result.get("data"), dict) or not result["data"].get("ok"):
+        detail = result["detail"] or (result.get("data") or {}).get("detail") if isinstance(result.get("data"), dict) else result["detail"]
+        raise HTTPException(status_code=502, detail=f"Hub registration failed: {detail or result['status']}")
+
+    data = result["data"]
+    hub_mid = data.get("hub_mid")
+    if not hub_mid or not hub_client.valid_hub_id(str(hub_mid)):
+        raise HTTPException(status_code=502, detail="Hub returned an unusable hub_mid")
+
+    now = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+    await insert_row("hub_merchant_links", {
+        "merchant_id": merchant_id, "hub_merchant_id": str(hub_mid),
+        "environment": hub_client.PAYMENT_HUB_ENV, "created_by": user["user_id"], "created_at": now})
+
+    # Audit WITHOUT the connection package (it contains the merchant's Hub API key)
+    await create_audit_log(user["user_id"], user["email"], "MERCHANT_HUB_REGISTER", "merchant", merchant_id,
+                           {"correlation_id": correlation_id, "hub_mid": hub_mid,
+                            "hub_merchant_id": data.get("merchant_id"), "platform_id": request.platform_id,
+                            "is_new": data.get("is_new")})
+
+    return {
+        "merchant_id": merchant_id,
+        "hub_mid": hub_mid,
+        "hub_merchant_int_id": data.get("merchant_id"),
+        "is_new": data.get("is_new"),
+        "message": data.get("message"),
+        "environment": hub_client.PAYMENT_HUB_ENV,
+        # Shown once to the operator; never stored in the admin
+        "connection": data.get("connection"),
+        "correlation_id": correlation_id,
     }
 
 @api_router.post("/hub/profiles/{profile_id}/ping")

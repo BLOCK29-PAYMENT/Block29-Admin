@@ -183,6 +183,37 @@ async def hub_payment_path(hub_merchant_id: str) -> Dict[str, Any]:
     return await hub_request("GET", f"/api/v1/admin/merchants/{_seg(hub_merchant_id)}/payment-path")
 
 
+VALID_REVENUE_RANGES = ("1d", "7d", "30d", "90d")
+
+
+async def hub_revenue_by_merchant(range_: str = "7d") -> Dict[str, Any]:
+    return await hub_request("GET", "/api/admin/v1/revenue/by-merchant", params={"range": range_})
+
+
+async def hub_revenue_by_processor(range_: str = "7d") -> Dict[str, Any]:
+    return await hub_request("GET", "/api/admin/v1/revenue/by-processor", params={"range": range_})
+
+
+async def hub_revenue_by_user(range_: str = "7d", hub_merchant_id: Optional[int] = None) -> Dict[str, Any]:
+    params: Dict[str, Any] = {"range": range_}
+    if hub_merchant_id is not None:
+        params["merchant_id"] = hub_merchant_id
+    return await hub_request("GET", "/api/admin/v1/revenue/by-user", params=params)
+
+
+async def hub_merchant_payment_summary(hub_merchant_int_id: int) -> Dict[str, Any]:
+    """SAFE per-merchant payment summary (device ids masked, no credentials)."""
+    return await hub_request("GET", f"/api/v1/admin/merchants/{int(hub_merchant_int_id)}/payment-summary")
+
+
+async def hub_merchant_register(payload: dict, correlation_id: Optional[str] = None) -> Dict[str, Any]:
+    """Atomic merchant registration in the Hub (merchant + hub_mid + API key).
+    The response's connection package contains the merchant's Hub API key -
+    callers must relay it once to the operator and never persist or log it."""
+    return await hub_request("POST", "/api/v1/admin/merchants/register", json_body=payload,
+                             correlation_id=correlation_id, timeout=20)
+
+
 async def hub_events_stats() -> Dict[str, Any]:
     return await hub_request("GET", "/api/v1/events/stats")
 

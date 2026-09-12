@@ -521,3 +521,101 @@ def test_hub_path_segments_are_encoded():
     assert not hub_module.valid_hub_id("../../etc")
     assert not hub_module.valid_hub_id("a?b")
     assert not hub_module.valid_hub_id("")
+
+
+# ---------------- Phase B: live revenue, one-click boarding, change-password ----------------
+
+def test_change_password_wrong_current(db):
+    db.one_results = [{"password": ADMIN_HASH}]
+    r = client.post("/api/auth/change-password", headers=auth(),
+                    json={"current_password": "wrong", "new_password": "newlongpass1"})
+    assert r.status_code == 400
+
+
+def test_change_password_weak_new_rejected(db):
+    r = client.post("/api/auth/change-password", headers=auth(),
+                    json={"current_password": "correct-password", "new_password": "short"})
+    assert r.status_code == 422
+
+
+def test_change_password_success_and_audited(db):
+    db.one_results = [{"password": ADMIN_HASH}]
+    r = client.post("/api/auth/change-password", headers=auth(),
+                    json={"current_password": "correct-password", "new_password": "newlongpass1"})
+    assert r.status_code == 200
+    assert any("password" in d for t, d in db.updates if t == "users")
+    audit = [d for t, d in db.inserts if t == "audit_logs"]
+    assert any('"password_changed": true' in d.get("details", "") for d in audit)
+    # the new password itself must never appear in the audit trail
+    assert all("newlongpass1" not in d.get("details", "") for d in audit)
+
+
+def test_hub_revenue_requires_role(db):
+    assert client.get("/api/hub/revenue", headers=auth("READ_ONLY")).status_code == 403
+
+
+def test_hub_revenue_rejects_bad_range(db):
+    r = client.get("/api/hub/revenue?range=999d", headers=auth())
+    assert r.status_code == 400
+
+
+def test_hub_register_requires_operations(db):
+    r = client.post("/api/hub/merchants/m1/register", headers=auth("SUPPORT"), json={"platform_id": 1})
+    assert r.status_code == 403
+
+
+def test_hub_register_already_linked_rejected(db):
+    db.one_results = [{"id": "m1", "business_name": "Cafe"}, {"hub_merchant_id": "AST2026000001"}]
+    r = client.post("/api/hub/merchants/m1/register", headers=auth(), json={"platform_id": 53})
+    assert r.status_code == 400
+
+
+def test_hub_register_unconfigured_503(db):
+    db.one_results = [{"id": "m1", "business_name": "Cafe"}, None]
+    r = client.post("/api/hub/merchants/m1/register", headers=auth(), json={"platform_id": 53})
+    assert r.status_code == 503
+
+
+def test_hub_register_success_links_audits_and_never_stores_api_key(db, monkeypatch):
+    monkeypatch.setattr(hub_module, "PAYMENT_HUB_URL", "http://hub.test")
+    monkeypatch.setattr(hub_module, "PAYMENT_HUB_ADMIN_KEY", "k")
+
+    async def fake_register(payload, correlation_id=None):
+        assert payload["user_id"] == "m1"  # admin merchant UUID is the canonical external ref
+        return hub_result(data={
+            "ok": True, "merchant_id": 110, "hub_mid": "AST2026000042", "is_new": True,
+            "message": "created",
+            "connection": {"PAYMENT_HUB_URL": "http://hub.test",
+                           "PAYMENT_HUB_API_KEY": "hub_SECRETVALUE", "PAYMENT_HUB_MERCHANT_ID": 110},
+        })
+    monkeypatch.setattr(hub_module, "hub_merchant_register", fake_register)
+
+    # fetch_one sequence: merchant, existing link (none), latest varsheet (none)
+    db.one_results = [{"id": "m1", "business_name": "Cafe", "contact_email": "c@x.co",
+                      "contact_phone": None, "address": None, "status": "active"}, None, None]
+    r = client.post("/api/hub/merchants/m1/register", headers=auth(), json={"platform_id": 53})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["hub_mid"] == "AST2026000042"
+    assert body["connection"]["PAYMENT_HUB_API_KEY"] == "hub_SECRETVALUE"  # relayed once
+
+    # link persisted with hub_mid, audit row written WITHOUT the api key
+    link_rows = [d for t, d in db.inserts if t == "hub_merchant_links"]
+    assert link_rows and link_rows[0]["hub_merchant_id"] == "AST2026000042"
+    audit_rows = [d for t, d in db.inserts if t == "audit_logs"]
+    assert any(d.get("action") == "MERCHANT_HUB_REGISTER" for d in audit_rows)
+    assert all("hub_SECRETVALUE" not in str(d) for d in audit_rows)
+
+
+def test_hub_register_hub_failure_502(db, monkeypatch):
+    monkeypatch.setattr(hub_module, "PAYMENT_HUB_URL", "http://hub.test")
+    monkeypatch.setattr(hub_module, "PAYMENT_HUB_ADMIN_KEY", "k")
+
+    async def fake_register(payload, correlation_id=None):
+        return hub_result(status="DEGRADED", http_status=422, detail="platform not found")
+    monkeypatch.setattr(hub_module, "hub_merchant_register", fake_register)
+
+    db.one_results = [{"id": "m1", "business_name": "Cafe", "status": "active"}, None, None]
+    r = client.post("/api/hub/merchants/m1/register", headers=auth(), json={"platform_id": 999})
+    assert r.status_code == 502
+    assert not [d for t, d in db.inserts if t == "hub_merchant_links"]

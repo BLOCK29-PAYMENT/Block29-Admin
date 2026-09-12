@@ -1,6 +1,8 @@
 import { useState } from 'react';
+import axios from 'axios';
 import { NavLink, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { toast } from 'sonner';
 import {
   LayoutDashboard,
   Store,
@@ -10,6 +12,7 @@ import {
   Radio,
   UserCog,
   LogOut,
+  KeyRound,
   ChevronDown,
   Menu,
   X,
@@ -23,8 +26,20 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from './ui/dropdown-menu';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+} from './ui/dialog';
 import { Button } from './ui/button';
+import { Input } from './ui/input';
+import { Label } from './ui/label';
 import { Avatar, AvatarFallback } from './ui/avatar';
+
+const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
 const navItems = [
   { path: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -42,6 +57,28 @@ export default function Layout({ children }) {
   const { user, logout } = useAuth();
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [pwDialogOpen, setPwDialogOpen] = useState(false);
+  const [currentPw, setCurrentPw] = useState('');
+  const [newPw, setNewPw] = useState('');
+  const [pwSaving, setPwSaving] = useState(false);
+
+  const changePassword = async () => {
+    setPwSaving(true);
+    try {
+      await axios.post(`${API}/auth/change-password`, {
+        current_password: currentPw,
+        new_password: newPw,
+      });
+      toast.success('Password changed');
+      setPwDialogOpen(false);
+      setCurrentPw('');
+      setNewPw('');
+    } catch (error) {
+      toast.error(error.response?.data?.detail || 'Failed to change password');
+    } finally {
+      setPwSaving(false);
+    }
+  };
 
   const getInitials = (name) => {
     return name?.split(' ').map(n => n[0]).join('').toUpperCase() || 'U';
@@ -166,6 +203,11 @@ export default function Layout({ children }) {
                     <p className="text-xs text-slate-500">{user?.email}</p>
                   </div>
                   <DropdownMenuSeparator />
+                  <DropdownMenuItem onClick={() => setPwDialogOpen(true)} data-testid="change-password-btn">
+                    <KeyRound size={16} className="mr-2" />
+                    Change Password
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
                   <DropdownMenuItem onClick={logout} className="text-red-600" data-testid="logout-btn">
                     <LogOut size={16} className="mr-2" />
                     Logout
@@ -183,6 +225,32 @@ export default function Layout({ children }) {
           </div>
         </main>
       </div>
+
+      {/* Change password dialog */}
+      <Dialog open={pwDialogOpen} onOpenChange={(open) => { setPwDialogOpen(open); if (!open) { setCurrentPw(''); setNewPw(''); } }}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Change Password</DialogTitle>
+            <DialogDescription>Enter your current password and a new one (minimum 8 characters).</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label>Current Password</Label>
+              <Input type="password" value={currentPw} onChange={(e) => setCurrentPw(e.target.value)} data-testid="current-password-input" />
+            </div>
+            <div>
+              <Label>New Password</Label>
+              <Input type="password" value={newPw} onChange={(e) => setNewPw(e.target.value)} data-testid="new-password-input" />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setPwDialogOpen(false)}>Cancel</Button>
+            <Button onClick={changePassword} disabled={!currentPw || newPw.length < 8 || pwSaving} data-testid="save-password-btn">
+              {pwSaving ? 'Saving...' : 'Change Password'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
